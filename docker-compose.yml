@@ -1,0 +1,95 @@
+services:
+  api:
+    build:
+      context: .
+    image: "${TOKENSQL_IMAGE:-tokensql:local}"
+    command: ["serve-api", "--host", "0.0.0.0", "--port", "8000"]
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    ports:
+      - "127.0.0.1:${TOKENSQL_API_PORT:-8000}:8000"
+    environment:
+      TOKENSQL_DATABASE_URL: "${TOKENSQL_DATABASE_URL:-sqlite+pysqlite:////data/tokensql.db}"
+      TOKENSQL_DATABASE_ECHO: "${TOKENSQL_DATABASE_ECHO:-false}"
+      TOKENSQL_SQLITE_BUSY_TIMEOUT_MS: "${TOKENSQL_SQLITE_BUSY_TIMEOUT_MS:-5000}"
+      TOKENSQL_QWEN_ENABLED: "${TOKENSQL_QWEN_ENABLED:-false}"
+      TOKENSQL_QWEN_BASE_URL: "${TOKENSQL_QWEN_BASE_URL:-http://127.0.0.1:18080/v1}"
+      TOKENSQL_QWEN_MODEL: "${TOKENSQL_QWEN_MODEL:-}"
+      TOKENSQL_QWEN_API_KEY: "${TOKENSQL_QWEN_API_KEY:-}"
+      TOKENSQL_QWEN_TIMEOUT_SECONDS: "${TOKENSQL_QWEN_TIMEOUT_SECONDS:-30}"
+      TOKENSQL_QWEN_MIN_CONFIDENCE: "${TOKENSQL_QWEN_MIN_CONFIDENCE:-0.75}"
+      TOKENSQL_QWEN_ALLOW_REMOTE: "${TOKENSQL_QWEN_ALLOW_REMOTE:-false}"
+    volumes:
+      - tokensql-data:/data
+    networks:
+      - tokensql
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  ui:
+    profiles: ["ui"]
+    image: "${TOKENSQL_IMAGE:-tokensql:local}"
+    build:
+      context: .
+    command: ["run-ui", "--host", "0.0.0.0", "--port", "8501"]
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    ports:
+      - "127.0.0.1:${TOKENSQL_UI_PORT:-8501}:8501"
+    environment:
+      TOKENSQL_API_URL: "http://api:8000"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=3).read()",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    networks:
+      - tokensql
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  postgres:
+    profiles: ["postgres"]
+    image: postgres:16
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-tokensql}"
+      POSTGRES_USER: "${POSTGRES_USER:-tokensql}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-}"
+    ports:
+      - "127.0.0.1:${TOKENSQL_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - tokensql-postgres:/var/lib/postgresql/data
+    networks:
+      - tokensql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tokensql} -d ${POSTGRES_DB:-tokensql}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  tokensql-data:
+  tokensql-postgres:
+
+networks:
+  tokensql:
+    driver: bridge

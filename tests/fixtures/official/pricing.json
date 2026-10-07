@@ -1,0 +1,11 @@
+{
+  "fixture_notice": "synthetic test data; not a real vendor quote",
+  "prices": [
+    {
+      "currency": "USD",
+      "effective_from": "2026-09-24T00:00:00Z",
+      "input_per_million": "1.25",
+      "output_per_million": "5.00"
+    }
+  ]
+}

@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "data_sources": [
+    {
+      "slug": "supplier-xlsx",
+      "name": "Supplier XLSX uploads",
+      "source_type": "provider_excel",
+      "authority_level": "secondary"
+    }
+  ],
+  "manufacturers": [
+    {
+      "slug": "example-ai",
+      "name": "Example AI"
+    }
+  ],
+  "models": [
+    {
+      "slug": "example-model",
+      "manufacturer_slug": "example-ai",
+      "canonical_name": "example-model",
+      "display_name": "Example Model"
+    }
+  ],
+  "model_versions": [
+    {
+      "slug": "example-model-2026",
+      "model_slug": "example-model",
+      "version_name": "2026"
+    }
+  ],
+  "providers": [
+    {
+      "slug": "example-provider",
+      "name": "Example Provider",
+      "provider_type": "reseller"
+    }
+  ],
+  "offerings": [
+    {
+      "slug": "example-offering",
+      "provider_slug": "example-provider",
+      "model_slug": "example-model",
+      "version_slug": "example-model-2026",
+      "provider_model_name": "example-model-api"
+    }
+  ],
+  "pricing_plans": [
+    {
+      "slug": "example-standard-plan",
+      "offering_slug": "example-offering",
+      "name": "standard",
+      "billing_mode": "pay_as_you_go",
+      "currency_code": "CNY",
+      "effective_from": "2026-01-01T00:00:00Z"
+    }
+  ],
+  "billing_metrics": [
+    {
+      "slug": "input-tokens",
+      "code": "input_tokens",
+      "display_name": "Input tokens",
+      "dimension": "token",
+      "direction": "input",
+      "unit_name": "token",
+      "unit_quantity": 1000000,
+      "comparable_group": "text_input"
+    },
+    {
+      "slug": "output-tokens",
+      "code": "output_tokens",
+      "display_name": "Output tokens",
+      "dimension": "token",
+      "direction": "output",
+      "unit_name": "token",
+      "unit_quantity": 1000000,
+      "comparable_group": "text_output"
+    }
+  ]
+}
