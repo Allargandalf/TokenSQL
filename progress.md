@@ -53,11 +53,15 @@
 - 用户明确授权“没有的话帮我创建”；原项目及父目录均不是 Git 仓库，现已运行 git init --initial-branch=main。
 - 保留并补充 .gitignore：排除虚拟环境、缓存、实际 .env、运行数据库及 WAL/SHM/journal、凭据/日志，以及 test/*.xlsx；.env.example、源码、测试代码、文档纳入首次基线。
 - 已按用户要求只读获取本机 Allargandalf 作者信息，并仅设置远端本项目 Git 作者；未修改本机或服务器全局 Git 设置。
-- 用户明确要求新公开个人仓库，只公开代码和文档，不创建 release/tag；已创建 Allargandalf/TokenSQL，计划从远端 main 推送首次基线，作为后续 Qwen 改动 review 的比较点。
+- 已从远端成功推送公开个人仓库 Allargandalf/TokenSQL 的 main；初始代码基线为 1827e82be9cac4f644bb35105ba47d89d052dab9，作为后续 Qwen 改动 review 的比较点。
 - 三份原 Excel 仅从 Git 暂存区移除，服务器原件未删除，也未进入首次提交历史。公开克隆需自行提供报价样表，真实样表测试只在保留原件的远端执行。
-- GitHub 凭据只用于本轮认证，不写入仓库/remote URL/文档；本机不写项目文件。未修改业务源码、共享服务或现有数据库。
+- 用户已完成远端 GitHub 设备网页登录；认证资料仅位于不跟踪的 .git 内，目录权限700/凭据文件600，项目级官方GH credential helper用于推送。未修改本机C盘或Git配置，不在仓库/remote URL/文档中记录令牌；未修改业务源码、共享服务或现有数据库。
 - 公开推送自动检查要求去敏：完整交接/环境原文保留在被忽略的 .private-docs/；公开文档替换内网地址/真实账户路径，环境报告只保留通用开发结论。未发布过含这些环境信息的提交，不创建 release/tag。
-- 初始化后的提交/忽略规则/工作区状态由主 Agent 检查；这不是新智能导入功能验收。
+- 主 Agent 验证：GitHub为public、默认main，首次远端SHA与本地基线一致；API查询release数量0，本地无tag，三份Excel原件仍在服务器且不跟踪。
+- 只读Subagent公开范围review通过；源码/tests/alembic相对初始基线无变化。这是版本控制交付，不是新智能导入功能验收。
+- 后续建议Qwen从main创建工作分支；review用 git diff 1827e82 -- src tests alembic 查看代码变化，同时检查新增/未跟踪文件。此次收尾仅追加进度文档提交，不改变代码基线。
+- 用户最新约束：禁止再阅读handoff；已通知Subagent停止相关读取，收尾只更新本进度文档并核对Git元数据。
+
 ## 历史调查里程碑（截至 2026-09-24）
 
 - [x] 调查 OS、CPU、内存、磁盘、GPU、Python 与依赖环境。
