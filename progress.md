@@ -65,6 +65,13 @@
   - 实机确认正确的 review 行为：表头"折扣"实为折后价的语义冲突由模型主动上报（旧 prompt 下 26/26 review）；offering 身份跨批次冲突 `catalog_conflict` 进 review；按秒报价 metric_unresolved 进 review。
 - 未做：真实官方价采集、PostgreSQL/容器、浏览器人工交互、与 coding 任务同时段压测。
 
+终审（2026-10-08，只读 Subagent 复核 `git diff 9a0f2eb..f99977f`）：无 Blocker；2 Major 已修复并回归（253 passed）：
+
+- Major 1 失败批次幂等遮蔽：复用查询现排除 `failed` 批次，重放时复活原批次（状态 processing、清 error_message、幂等键保持唯一），`_record_failure` 对再次失败更新错误信息；新增 retry-after-failure 回归测试。deployment 文档重试语义同步。
+- Major 2 prompt 版本文档滞后：README/deployment/.env.example 的默认版本同步为 `qwen-extract-v3`/`qwen-table-v2`。
+- Minor 已修：re-extract 缺 stored understanding 改 ValueError→409（原 503）；`_idempotency_key` 对 context_defaults/vendor_context 做 `_json_safe`。
+- 已知未修（记录）：config 版本旋钮与 semantic.py 常量脱钩（table 版本不进幂等键）；re-extract 模型调用仍在 DB 事务内（最长阻塞=timeout）；re-extract 旧批次回退版本字符串为历史值；normalization 失败仅审计不建 ReviewItem；`_workbook_summary` 二级截断；verify_model 绕过信号量；UI prompt 与 qwen 关闭时 provider_id 必填放宽按 prompt 判定。均为 MVP 可接受，后续迭代处理。
+
 下一步（恢复时按序）：1) 隔离验收库 alembic upgrade + 最小 bootstrap（source+metrics）；2) 三份 test/*.xlsx + 明确中文 Context 跑 SemanticExcelImportService 实机闭环并记录各 Sheet 自动/review/失败数与价格证据；3) 起 API/UI 实测（无 chromium，用 streamlit AppTest + 运行中服务 curl，浏览器人工交互如实标注未做）；4) 并发探针（2 路 TokenSQL 请求 + 网关排队）；5) 全绿后按小任务 commit 到 qwen-semantic-import 并请 review Subagent 复核 git diff 1827e82。
 
 ## 2026-10-07 交接轮验证（历史）
