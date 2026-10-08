@@ -35,6 +35,10 @@ from .review_service import (
     ReviewService,
     ReviewStateError,
 )
+from .semantic_import_service import (
+    SemanticExcelImportService,
+    SemanticImportError,
+)
 
 __all__ = [
     "BootstrapDocument", "BootstrapResult", "BootstrapService",
@@ -46,6 +50,7 @@ __all__ = [
     "OfficialPriceService", "OfficialSourceValidationError",
     "PricingNotFoundError", "PricingService", "PricingValidationError",
     "ReviewNotFoundError", "ReviewService", "ReviewStateError",
+    "SemanticExcelImportService", "SemanticImportError",
     "iter_price_snapshots_csv", "load_bootstrap_document",
     "price_snapshots_to_csv",
 ]

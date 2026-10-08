@@ -80,7 +80,27 @@ def test_profile_xlsx_is_preview_only_and_can_emit_json(tmp_path: Path) -> None:
     call.assert_called_once_with(workbook.resolve(), profile)
 
 
-def test_import_xlsx_requires_source_id_and_profile(tmp_path: Path) -> None:
+def _import_summary_stub(**overrides: object) -> SimpleNamespace:
+    fields = {
+        "batch_id": 7,
+        "source_artifact_id": 3,
+        "idempotency_key": "excel:" + "0" * 64,
+        "status": "partial",
+        "total_rows": 26,
+        "accepted_rows": 0,
+        "rejected_rows": 0,
+        "review_rows": 26,
+        "staged_quote_count": 26,
+        "review_item_count": 26,
+        "reused_existing": False,
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
+def test_import_xlsx_requires_source_id_and_provider_or_prompt(
+    tmp_path: Path,
+) -> None:
     workbook = tmp_path / "quotes.xlsx"
     workbook.write_bytes(b"placeholder")
     profile = tmp_path / "profile.json"
@@ -89,14 +109,17 @@ def test_import_xlsx_requires_source_id_and_profile(tmp_path: Path) -> None:
     missing_source = runner.invoke(
         app, ["import-xlsx", str(workbook), "--profile", str(profile)]
     )
-    missing_profile = runner.invoke(
-        app, ["import-xlsx", str(workbook), "--source-id", "1", "--provider-id", "2"]
+    missing_provider = runner.invoke(
+        app, ["import-xlsx", str(workbook), "--source-id", "1"]
     )
 
     assert missing_source.exit_code != 0
     assert "--source-id" in missing_source.output
-    assert missing_profile.exit_code != 0
-    assert "--profile" in missing_profile.output
+    assert missing_provider.exit_code == 2
+    assert (
+        "--provider-id is required unless --prompt/--prompt-file is given"
+        in missing_provider.output
+    )
 
 
 def test_import_xlsx_passes_reviewed_context_without_starting_services(
@@ -110,7 +133,9 @@ def test_import_xlsx_passes_reviewed_context_without_starting_services(
 
     with (
         patch("tokensql.cli._load_profile_file", return_value=profile),
-        patch("tokensql.cli._import_workbook", return_value="batch=7") as call,
+        patch(
+            "tokensql.cli._import_workbook", return_value=_import_summary_stub()
+        ) as call,
     ):
         result = runner.invoke(
             app,
@@ -129,7 +154,10 @@ def test_import_xlsx_passes_reviewed_context_without_starting_services(
         )
 
     assert result.exit_code == 0
-    assert "batch=7" in result.stdout
+    assert "batch_id=7" in result.stdout
+    assert "idempotency_key=excel:" in result.stdout
+    assert "total=26" in result.stdout
+    assert "review=26" in result.stdout
     call.assert_called_once_with(
         path=workbook.resolve(),
         source_id=42,
@@ -137,7 +165,96 @@ def test_import_xlsx_passes_reviewed_context_without_starting_services(
         provider_id=7,
         parser_version="test-v1",
         database_url=None,
+        prompt_text="",
+        context_defaults={},
     )
+
+
+def test_import_xlsx_prompt_without_provider_id_and_without_profile(
+    tmp_path: Path,
+) -> None:
+    workbook = tmp_path / "quotes.xlsx"
+    workbook.write_bytes(b"placeholder")
+
+    with patch(
+        "tokensql.cli._import_workbook", return_value=_import_summary_stub()
+    ) as call:
+        result = runner.invoke(
+            app,
+            [
+                "import-xlsx",
+                str(workbook),
+                "--source-id",
+                "42",
+                "--prompt",
+                "该表厂商为 Example AI；缺省币种 CNY。",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "batch_id=7" in result.stdout
+    kwargs = call.call_args.kwargs
+    assert kwargs["provider_id"] is None
+    assert kwargs["prompt_text"] == "该表厂商为 Example AI；缺省币种 CNY。"
+    assert kwargs["context_defaults"] == {}
+    from tokensql.importers import ParserProfile
+
+    assert isinstance(kwargs["profile"], ParserProfile)
+
+
+def test_import_xlsx_prompt_file_is_read_as_utf8_text(tmp_path: Path) -> None:
+    workbook = tmp_path / "quotes.xlsx"
+    workbook.write_bytes(b"placeholder")
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("报价供应商为 Example Provider\n币种 CNY", encoding="utf-8")
+
+    with patch(
+        "tokensql.cli._import_workbook", return_value=_import_summary_stub()
+    ) as call:
+        result = runner.invoke(
+            app,
+            [
+                "import-xlsx",
+                str(workbook),
+                "--source-id",
+                "42",
+                "--prompt-file",
+                str(prompt_file),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert call.call_args.kwargs["prompt_text"] == (
+        "报价供应商为 Example Provider\n币种 CNY"
+    )
+
+
+def test_import_xlsx_prompt_and_prompt_file_are_mutually_exclusive(
+    tmp_path: Path,
+) -> None:
+    workbook = tmp_path / "quotes.xlsx"
+    workbook.write_bytes(b"placeholder")
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("供应商 X", encoding="utf-8")
+
+    with patch("tokensql.cli._import_workbook") as call:
+        result = runner.invoke(
+            app,
+            [
+                "import-xlsx",
+                str(workbook),
+                "--source-id",
+                "42",
+                "--prompt",
+                "供应商 Y",
+                "--prompt-file",
+                str(prompt_file),
+            ],
+        )
+
+    assert result.exit_code == 2
+    assert "mutually exclusive" in result.output
+    call.assert_not_called()
 
 
 def test_bootstrap_catalog_is_mocked(tmp_path: Path) -> None:

@@ -49,6 +49,8 @@ class ImportRequest(APIModel):
     provider_id: int | None = Field(default=None, gt=0)
     vendor_context: dict[str, Any] = Field(default_factory=dict)
     initiated_by: str | None = Field(default=None, max_length=255)
+    prompt_text: str = Field(default="", max_length=8000)
+    context_defaults: dict[str, Any] = Field(default_factory=dict)
 
 
 class ReviewApproveRequest(APIModel):
@@ -166,6 +168,18 @@ class ConfirmedComponentRequest(APIModel):
                 "discount component requires discount_rate and no monetary fields"
             )
         return self
+
+
+class ReExtractRequest(APIModel):
+    actor: str = Field(min_length=1, max_length=255)
+
+    @field_validator("actor")
+    @classmethod
+    def actor_must_not_be_blank(cls, value: str) -> str:
+        cleaned = " ".join(value.split())
+        if not cleaned:
+            raise ValueError("actor cannot be blank")
+        return cleaned
 
 
 class ConfirmStagedQuoteRequest(UTCModel):
@@ -294,6 +308,11 @@ class ImportSummaryResponse(APIModel):
     staged_quote_count: int
     review_item_count: int
     reused_existing: bool
+
+
+class ImportContextResponse(APIModel):
+    batch_id: int
+    import_context: dict[str, Any]
 
 
 class ReviewResponse(UTCModel):

@@ -26,6 +26,7 @@ from tokensql.api.schemas import (
     FXRateCreateRequest,
     FXRateResponse,
     HealthResponse,
+    ImportContextResponse,
     ImportRequest,
     ImportSummaryResponse,
     ModelResponse,
@@ -42,6 +43,7 @@ from tokensql.api.schemas import (
     QwenHealthResponse,
     ProfileContextRequest,
     ProviderResponse,
+    ReExtractRequest,
     ReviewApproveRequest,
     ReviewRejectRequest,
     ReviewResponse,
@@ -55,6 +57,7 @@ from tokensql.db.models import (
     AuditEvent,
     DataSource,
     FXRate,
+    ImportBatch,
     PriceComponent,
     PriceNormalization,
     PriceSnapshot,
@@ -73,6 +76,10 @@ from tokensql.services.import_service import (
     ExcelImportService,
     ImportContext,
     ImportSummary,
+)
+from tokensql.services.semantic_import_service import (
+    SemanticExcelImportService,
+    SemanticImportError,
 )
 from tokensql.services.pricing_service import (
     DuplicatePublicationError,
@@ -558,6 +565,12 @@ def create_app() -> FastAPI:
         from fastapi.responses import JSONResponse
         return JSONResponse(status_code=422, content={"detail": _public_detail(error)})
 
+    @api.exception_handler(SemanticImportError)
+    async def semantic_unavailable_handler(request: Any, error: Exception):
+        del request
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=503, content={"detail": _public_detail(error)})
+
     @api.get("/health", response_model=HealthResponse)
     def health(session: Session = Depends(get_session)) -> HealthResponse:
         try:
@@ -632,6 +645,7 @@ def create_app() -> FastAPI:
         body = _parse_json_form(request, ImportRequest, "request")
         path, filename = await _save_xlsx(file)
         try:
+            settings = get_settings()
             context = ImportContext(
                 data_source_id=body.data_source_id,
                 parser_version=body.parser_version,
@@ -643,9 +657,22 @@ def create_app() -> FastAPI:
                     "original_filename": filename,
                 },
                 initiated_by=body.initiated_by,
+                prompt_text=body.prompt_text,
+                context_defaults=body.context_defaults,
+                interpretation_version=(
+                    settings.qwen_extraction_version
+                    if body.prompt_text and settings.qwen_enabled
+                    else "deterministic-v1"
+                ),
             )
+            if body.prompt_text and settings.qwen_enabled:
+                service: Any = SemanticExcelImportService(settings=settings)
+            else:
+                service = ExcelImportService()
             try:
-                result = ExcelImportService().import_file(session, path, context)
+                result = service.import_file(session, path, context)
+            except SemanticImportError:
+                raise
             except ValueError as error:
                 raise HTTPException(
                     status_code=422, detail=_public_detail(error)
@@ -659,6 +686,22 @@ def create_app() -> FastAPI:
             return _summary_response(result)
         finally:
             path.unlink(missing_ok=True)
+
+    @api.get(
+        "/imports/{batch_id}/context", response_model=ImportContextResponse
+    )
+    def import_context(
+        batch_id: int,
+        session: Session = Depends(get_session),
+    ) -> ImportContextResponse:
+        batch = session.get(ImportBatch, batch_id)
+        if batch is None:
+            raise HTTPException(
+                status_code=404, detail=f"import batch {batch_id} not found"
+            )
+        return ImportContextResponse(
+            batch_id=batch.id, import_context=dict(batch.import_context or {})
+        )
 
     @api.get("/staged-quotes", response_model=list[StagedQuoteResponse])
     def staged_quotes(
@@ -713,6 +756,28 @@ def create_app() -> FastAPI:
             components=[item.model_dump() for item in body.components],
             note=body.note,
         )
+        return _staged_response(value)
+
+    @api.post("/staged-quotes/{staged_quote_id}/re-extract",
+              response_model=StagedQuoteResponse)
+    def reextract_staged_quote(
+        staged_quote_id: int,
+        body: ReExtractRequest,
+        session: Session = Depends(get_session),
+    ) -> StagedQuoteResponse:
+        if not get_settings().qwen_enabled:
+            raise HTTPException(
+                status_code=409, detail="Qwen semantic pipeline is disabled"
+            )
+        service = SemanticExcelImportService()
+        try:
+            value = service.reextract_staged_quote(
+                session, staged_quote_id, actor=body.actor
+            )
+        except LookupError as error:
+            raise HTTPException(status_code=404, detail=_public_detail(error)) from None
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=_public_detail(error)) from None
         return _staged_response(value)
 
     @api.get("/reviews", response_model=list[ReviewResponse])

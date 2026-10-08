@@ -390,3 +390,42 @@ def test_client_staged_quote_inspection_and_confirmation() -> None:
         "limit": "10",
     }
     assert json.loads(seen[2].content) == confirmation
+
+
+def test_get_import_context_uses_dedicated_endpoint() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path == "/imports/7/context":
+            return httpx.Response(
+                200,
+                json={
+                    "batch_id": 7,
+                    "import_context": {
+                        "prompt_text": "厂商为 Example AI",
+                        "prompt_sha256": "a" * 64,
+                        "context_defaults": {"currency": "CNY"},
+                        "context_scope": "batch",
+                        "context_version": 1,
+                    },
+                },
+            )
+        return httpx.Response(404, json={"detail": "import batch not found"})
+
+    with TokenSQLClient(transport=httpx.MockTransport(handler)) as client:
+        payload = client.get_import_context(7)
+        with pytest.raises(APIError) as caught:
+            client.get_import_context(999)
+
+    assert seen[0].method == "GET"
+    assert seen[0].url.path == "/imports/7/context"
+    assert payload["batch_id"] == 7
+    assert payload["import_context"]["prompt_text"] == "厂商为 Example AI"
+    assert payload["import_context"]["context_defaults"] == {"currency": "CNY"}
+    assert caught.value.status_code == 404
+
+    transport = httpx.MockTransport(lambda _: pytest.fail("must not send"))
+    with TokenSQLClient(transport=transport) as client:
+        with pytest.raises(RequestValidationError):
+            client.get_import_context("../1")

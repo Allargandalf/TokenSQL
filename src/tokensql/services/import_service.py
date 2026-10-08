@@ -15,6 +15,7 @@ from enum import Enum
 import hashlib
 import json
 from pathlib import Path
+import unicodedata
 from typing import Any, Iterator, Mapping, Sequence
 
 from sqlalchemy import func, select
@@ -45,6 +46,9 @@ class ImportContext:
     ``sheet_names=None`` means all workbook sheets.  ``vendor_context`` is
     audit-only context (for example a supplier account or quotation date); it is
     included in the idempotency key because it can change interpretation.
+    ``prompt_text`` is the free-text import instruction and ``context_defaults``
+    the structured defaults (manufacturer/provider/currency/unit); both enter
+    the model request downstream and the idempotency key here.
     """
 
     data_source_id: int
@@ -54,6 +58,9 @@ class ImportContext:
     provider_id: int | None = None
     vendor_context: Mapping[str, Any] = field(default_factory=dict)
     initiated_by: str | None = None
+    prompt_text: str = ""
+    context_defaults: Mapping[str, Any] = field(default_factory=dict)
+    interpretation_version: str = "deterministic-v1"
 
     def __post_init__(self) -> None:
         if self.data_source_id <= 0:
@@ -61,6 +68,14 @@ class ImportContext:
         if not self.parser_version.strip():
             raise ValueError("parser_version must not be blank")
         object.__setattr__(self, "parser_version", self.parser_version.strip())
+        object.__setattr__(self, "prompt_text", self.prompt_text.strip())
+        if not isinstance(self.context_defaults, Mapping):
+            raise ValueError("context_defaults must be a mapping")
+        if not self.interpretation_version.strip():
+            raise ValueError("interpretation_version must not be blank")
+        object.__setattr__(
+            self, "interpretation_version", self.interpretation_version.strip()
+        )
         if self.provider_id is not None and self.provider_id <= 0:
             raise ValueError("provider_id must be positive when supplied")
         if self.sheet_names is not None:
@@ -150,6 +165,18 @@ def _profile_payload(profile: ParserProfile) -> dict[str, Any]:
     }
 
 
+def normalize_prompt(text: str) -> str:
+    """Canonicalize a free-text prompt so equivalent wording hashes the same."""
+
+    normalized = unicodedata.normalize("NFKC", text or "")
+    lines = [" ".join(line.split()) for line in normalized.splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
+def _prompt_sha256(text: str) -> str:
+    return hashlib.sha256(normalize_prompt(text).encode("utf-8")).hexdigest()
+
+
 def _context_payload(context: ImportContext) -> dict[str, Any]:
     return {
         "data_source_id": context.data_source_id,
@@ -159,6 +186,10 @@ def _context_payload(context: ImportContext) -> dict[str, Any]:
         "provider_id": context.provider_id,
         "vendor_context": context.vendor_context,
         "initiated_by": context.initiated_by,
+        "prompt_text": context.prompt_text,
+        "prompt_sha256": _prompt_sha256(context.prompt_text),
+        "context_defaults": _json_safe(context.context_defaults),
+        "interpretation_version": context.interpretation_version,
     }
 
 
@@ -171,6 +202,10 @@ def _idempotency_key(artifact_sha256: str, context: ImportContext) -> str:
         "sheet_names": sorted(context.sheet_names) if context.sheet_names is not None else None,
         "provider_id": context.provider_id,
         "vendor_context": context.vendor_context,
+        "prompt_text": context.prompt_text,
+        "prompt_sha256": _prompt_sha256(context.prompt_text),
+        "context_defaults": context.context_defaults,
+        "interpretation_version": context.interpretation_version,
     }
     digest = hashlib.sha256(_canonical_json(interpretation).encode("utf-8")).hexdigest()
     return "excel:" + digest
@@ -397,6 +432,8 @@ class ExcelImportService:
                     import_context=_json_safe(
                         {
                             **_context_payload(context),
+                            "context_scope": "batch",
+                            "context_version": 1,
                             "effective_sheet_names": [sheet.title for sheet in selected],
                             "workbook_review_reasons": parsed.workbook.review_reasons,
                         }
@@ -452,8 +489,9 @@ class ExcelImportService:
                 "use OfficialPriceService"
             )
         if context.provider_id is None:
-            raise ValueError("provider_id is required for Excel import")
-        if session.get(Provider, context.provider_id) is None:
+            if not context.prompt_text:
+                raise ValueError("provider_id is required for Excel import")
+        elif session.get(Provider, context.provider_id) is None:
             raise ValueError(f"unknown provider_id: {context.provider_id}")
 
     @staticmethod
@@ -735,6 +773,8 @@ class ExcelImportService:
                     import_context=_json_safe(
                         {
                             **_context_payload(context),
+                            "context_scope": "batch",
+                            "context_version": 1,
                             "failure_phase": "excel_staging",
                         }
                     ),

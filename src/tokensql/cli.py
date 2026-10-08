@@ -197,26 +197,48 @@ def _upgrade_database(
         ) from exc
 
 
+def _default_profile() -> Any:
+    importer = _load_module("tokensql.importers", "Excel profiling")
+    return importer.ParserProfile()
+
+
 def _import_workbook(
     path: Path,
     source_id: int,
-    provider_id: int,
+    provider_id: Optional[int],
     profile: Any,
     parser_version: str,
     database_url: Optional[str],
+    prompt_text: str = "",
+    context_defaults: Optional[dict[str, Any]] = None,
 ) -> Any:
     service_module = _load_module(
         "tokensql.services.import_service", "Excel persistence service"
     )
     session_module = _load_module("tokensql.db.session", "Database session")
+    config_module = _load_module("tokensql.config", "TokenSQL configuration")
     try:
+        settings = config_module.get_settings()
+        semantic = bool(prompt_text.strip()) and settings.qwen_enabled
+        if semantic:
+            semantic_module = _load_module(
+                "tokensql.services.semantic_import_service",
+                "Semantic Excel import service",
+            )
+            service = semantic_module.SemanticExcelImportService(settings=settings)
+            interpretation_version = settings.qwen_extraction_version
+        else:
+            service = service_module.ExcelImportService(settings=settings)
+            interpretation_version = "deterministic-v1"
         context = service_module.ImportContext(
             data_source_id=source_id,
             provider_id=provider_id,
             parser_version=parser_version,
             profile=profile,
+            prompt_text=prompt_text,
+            context_defaults=context_defaults or {},
+            interpretation_version=interpretation_version,
         )
-        service = service_module.ExcelImportService()
         engine = session_module.create_db_engine(database_url)
         factory = session_module.create_session_factory(engine)
         try:
@@ -228,6 +250,26 @@ def _import_workbook(
         raise CliRuntimeError(
             f"Excel import failed ({type(exc).__name__}: {exc})."
         ) from exc
+
+
+def _import_result_payload(result: Any) -> dict[str, Any]:
+    keys = (
+        "batch_id",
+        "source_artifact_id",
+        "idempotency_key",
+        "status",
+        "total_rows",
+        "accepted_rows",
+        "rejected_rows",
+        "review_rows",
+        "staged_quote_count",
+        "review_item_count",
+        "reused_existing",
+    )
+    payload = {key: getattr(result, key) for key in keys if hasattr(result, key)}
+    if not payload:
+        return {"result": str(result)}
+    return payload
 
 
 def _bootstrap_catalog(path: Path, database_url: Optional[str]) -> Any:
@@ -612,18 +654,38 @@ def import_xlsx(
         min=1,
         help="Existing data_source primary key; the parser never invents it.",
     ),
-    provider_id: int = typer.Option(
-        ..., "--provider-id", min=1, help="Existing reviewed provider ID."
+    provider_id: Optional[int] = typer.Option(
+        None,
+        "--provider-id",
+        min=1,
+        help="Existing reviewed provider ID; optional when --prompt/--prompt-file "
+        "supplies the semantic context.",
     ),
-    profile_path: Path = typer.Option(
-        ...,
+    profile_path: Optional[Path] = typer.Option(
+        None,
         "--profile",
         exists=True,
         file_okay=True,
         dir_okay=False,
         readable=True,
         resolve_path=True,
-        help="Required JSON parser profile reviewed for this workbook.",
+        help="Optional JSON parser profile; defaults to the built-in profile.",
+    ),
+    prompt: str = typer.Option(
+        "",
+        "--prompt",
+        help="Free-text import context (default vendor, currency, unit, column "
+        "meanings); mutually exclusive with --prompt-file.",
+    ),
+    prompt_file: Optional[Path] = typer.Option(
+        None,
+        "--prompt-file",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        resolve_path=True,
+        help="UTF-8 text file holding the free-text import context.",
     ),
     parser_version: str = typer.Option(
         "cli-v1", help="Parser version recorded for auditability."
@@ -635,10 +697,30 @@ def import_xlsx(
         help="SQLAlchemy URL. Defaults to TOKENSQL_DATABASE_URL/application settings.",
     ),
 ) -> None:
-    """Import an XLSX using an existing source ID and an explicit JSON profile."""
+    """Import an XLSX with an optional free-text prompt instead of manual profiles."""
 
     try:
-        profile = _load_profile_file(profile_path)
+        if prompt.strip() and prompt_file is not None:
+            raise CliRuntimeError(
+                "--prompt and --prompt-file are mutually exclusive."
+            )
+        prompt_text = prompt
+        if prompt_file is not None:
+            try:
+                prompt_text = prompt_file.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                raise CliRuntimeError(
+                    f"Cannot read prompt file {prompt_file}: {exc}"
+                ) from exc
+        if provider_id is None and not prompt_text.strip():
+            raise CliRuntimeError(
+                "--provider-id is required unless --prompt/--prompt-file is given"
+            )
+        profile = (
+            _load_profile_file(profile_path)
+            if profile_path is not None
+            else _default_profile()
+        )
         result = _import_workbook(
             path=path,
             source_id=source_id,
@@ -646,10 +728,21 @@ def import_xlsx(
             profile=profile,
             parser_version=parser_version,
             database_url=database_url,
+            prompt_text=prompt_text,
+            context_defaults={},
         )
     except CliRuntimeError as exc:
         _abort(str(exc))
-    typer.echo(f"Excel import completed: {result!s}")
+    payload = _import_result_payload(result)
+    typer.echo(
+        "Excel import completed: "
+        f"batch_id={payload.get('batch_id')} "
+        f"idempotency_key={payload.get('idempotency_key')} "
+        f"total={payload.get('total_rows')} "
+        f"accepted={payload.get('accepted_rows')} "
+        f"rejected={payload.get('rejected_rows')} "
+        f"review={payload.get('review_rows')}"
+    )
 
 
 @app.command("official-refresh")
