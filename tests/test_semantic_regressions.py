@@ -52,6 +52,7 @@ from tests.test_semantic_import import (
     _sheet,
     _staged_for,
     _understanding,
+    _quote_workbook,
     _write_workbook,
     catalog,
     session,
@@ -587,3 +588,67 @@ def test_unknown_envelope_fields_are_tolerated_by_chat_json() -> None:
 
     assert result.model == MODEL
     assert result.data["sheets"][0]["sheet"] == "S1"
+
+
+# --------------------------------------------------------------------- #
+# 10. failed batches are retried on replay instead of shadowing the key
+# --------------------------------------------------------------------- #
+
+
+def test_failed_batch_is_revived_on_replay(
+    session: Session, catalog: dict[str, dict[str, int]], tmp_path: Path
+) -> None:
+    from tokensql.db.models import ImportBatch
+    from tokensql.services.semantic_import_service import SemanticImportError
+
+    path = _quote_workbook(tmp_path / "retry.xlsx")
+    context = _context(catalog)
+
+    failing = MockGateway(
+        understanding=httpx.Response(502, json={"error": "upstream"}),
+        row_batches=[],
+    )
+    with pytest.raises(SemanticImportError, match="table understanding failed"):
+        _service(failing).import_file(session, path, context)
+    failed = session.scalar(
+        select(ImportBatch).where(ImportBatch.status == "failed")
+    )
+    assert failed is not None
+    assert failed.error_message and "table understanding failed" in failed.error_message
+
+    healthy = MockGateway(
+        understanding=_understanding(_sheet("S1", currency="CNY")),
+        row_batches=[
+            _row_batch(
+                _row(
+                    2,
+                    [
+                        _monetary(
+                            "2.00",
+                            evidence=["S1!B2"],
+                            direction="input",
+                        )
+                    ],
+                    model_name="Alpha-1",
+                    manufacturer="AlphaLabs",
+                    provider="ResellerOne",
+                )
+            )
+        ],
+    )
+    summary = _service(healthy).import_file(session, path, context)
+
+    assert summary.reused_existing is False
+    assert summary.batch_id == failed.id
+    revived = session.get(ImportBatch, failed.id)
+    assert revived.status in {"completed", "partial"}
+    assert revived.error_message is None
+    assert healthy.counts["models"] == 1
+    assert healthy.counts["table"] == 1
+    assert session.scalar(select(func.count(PriceSnapshot.id))) == 1
+
+    replay = _service(
+        MockGateway(understanding=None, row_batches=[])
+    ).import_file(session, path, context)
+    assert replay.reused_existing is True
+    assert replay.batch_id == failed.id

@@ -123,6 +123,15 @@ def _transaction(session: Session) -> Iterator[None]:
         yield
 
 
+def _revive_failed_batch(batch: ImportBatch) -> None:
+    """Reset a recorded failure batch so the same import can be retried."""
+
+    batch.status = "processing"
+    batch.error_message = None
+    batch.started_at = utc_now()
+    batch.completed_at = None
+
+
 def _json_safe(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, bool)):
         return value
@@ -201,10 +210,10 @@ def _idempotency_key(artifact_sha256: str, context: ImportContext) -> str:
         "profile": _profile_payload(context.profile),
         "sheet_names": sorted(context.sheet_names) if context.sheet_names is not None else None,
         "provider_id": context.provider_id,
-        "vendor_context": context.vendor_context,
+        "vendor_context": _json_safe(context.vendor_context),
         "prompt_text": context.prompt_text,
         "prompt_sha256": _prompt_sha256(context.prompt_text),
-        "context_defaults": context.context_defaults,
+        "context_defaults": _json_safe(context.context_defaults),
         "interpretation_version": context.interpretation_version,
     }
     digest = hashlib.sha256(_canonical_json(interpretation).encode("utf-8")).hexdigest()
@@ -405,7 +414,7 @@ class ExcelImportService:
                 existing = session.scalar(
                     select(ImportBatch).where(ImportBatch.idempotency_key == key)
                 )
-                if existing is not None:
+                if existing is not None and existing.status != "failed":
                     return _summary(session, existing, reused=True)
 
             parsed = parse_excel(path, profile=context.profile)
@@ -416,20 +425,16 @@ class ExcelImportService:
                 existing = session.scalar(
                     select(ImportBatch).where(ImportBatch.idempotency_key == key)
                 )
-                if existing is not None:
+                if existing is not None and existing.status != "failed":
                     return _summary(session, existing, reused=True)
 
                 artifact = self._get_or_create_artifact(
                     session, path, artifact_sha256, parsed, context
                 )
-                batch = ImportBatch(
-                    source_artifact=artifact,
-                    provider_id=context.provider_id,
-                    idempotency_key=key,
-                    parser_version=context.parser_version,
-                    status="processing",
-                    initiated_by=context.initiated_by,
-                    import_context=_json_safe(
+                if existing is not None:
+                    _revive_failed_batch(existing)
+                    batch = existing
+                    batch.import_context = _json_safe(
                         {
                             **_context_payload(context),
                             "context_scope": "batch",
@@ -437,9 +442,26 @@ class ExcelImportService:
                             "effective_sheet_names": [sheet.title for sheet in selected],
                             "workbook_review_reasons": parsed.workbook.review_reasons,
                         }
-                    ),
-                )
-                session.add(batch)
+                    )
+                else:
+                    batch = ImportBatch(
+                        source_artifact=artifact,
+                        provider_id=context.provider_id,
+                        idempotency_key=key,
+                        parser_version=context.parser_version,
+                        status="processing",
+                        initiated_by=context.initiated_by,
+                        import_context=_json_safe(
+                            {
+                                **_context_payload(context),
+                                "context_scope": "batch",
+                                "context_version": 1,
+                                "effective_sheet_names": [sheet.title for sheet in selected],
+                                "workbook_review_reasons": parsed.workbook.review_reasons,
+                            }
+                        ),
+                    )
+                    session.add(batch)
                 session.flush()
                 with self._candidate_selector() as qwen_client:
                     batch.import_context = {
@@ -754,6 +776,12 @@ class ExcelImportService:
                     )
                 )
                 if existing is not None:
+                    if existing.status == "failed":
+                        failed_at = utc_now()
+                        existing.error_message = (
+                            f"{error.__class__.__name__}: {error}"
+                        )
+                        existing.completed_at = failed_at
                     return
                 artifact = self._get_or_create_artifact(
                     session, path, artifact_sha256, None, context

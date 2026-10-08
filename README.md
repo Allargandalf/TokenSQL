@@ -242,5 +242,5 @@ progress.md。真实样表测试只读取 `test/` 下的文件。
 | `TOKENSQL_QWEN_REASONING_EFFORT` | `low` | 可选 `none`/`low`/`medium`/`high` |
 | `TOKENSQL_QWEN_AUTO_PUBLISH_MIN_CONFIDENCE` | `0.85` | 自动发布门槛，作用于整行与 `model_name`/`components` 字段置信度 |
 | `TOKENSQL_QWEN_MIN_CONFIDENCE` | `0.75` | 旧确定性路径的候选匹配门槛 |
-| `TOKENSQL_QWEN_EXTRACTION_VERSION` | `qwen-extract-v1` | 逐行抽取/prompt 版本，进入幂等键与审计 |
-| `TOKENSQL_QWEN_TABLE_PROMPT_VERSION` | `qwen-table-v1` | 整表理解 prompt 版本，记入批次上下文 |
+| `TOKENSQL_QWEN_EXTRACTION_VERSION` | `qwen-extract-v3` | 逐行抽取/prompt 版本，进入幂等键与审计 |
+| `TOKENSQL_QWEN_TABLE_PROMPT_VERSION` | `qwen-table-v2` | 整表理解 prompt 版本，记入批次上下文 |

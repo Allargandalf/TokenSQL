@@ -66,6 +66,7 @@ from .import_service import (
     _json_safe,
     _model_name,
     _nonempty_data_row,
+    _revive_failed_batch,
     _sha256_file,
     _summary,
     _transaction,
@@ -987,7 +988,7 @@ class SemanticExcelImportService(ExcelImportService):
         batch = import_row.import_batch
         semantic = batch.import_context.get("semantic")
         if not semantic or "table_understanding" not in semantic:
-            raise SemanticImportError(
+            raise ValueError(
                 "batch has no stored table understanding; run a fresh semantic import"
             )
         context = ImportContext(
@@ -1150,7 +1151,7 @@ class SemanticExcelImportService(ExcelImportService):
                 existing = session.scalar(
                     select(ImportBatch).where(ImportBatch.idempotency_key == key)
                 )
-                if existing is not None:
+                if existing is not None and existing.status != "failed":
                     return _summary(session, existing, reused=True)
 
             parsed = parse_excel(path, profile=context.profile)
@@ -1162,33 +1163,37 @@ class SemanticExcelImportService(ExcelImportService):
                 existing = session.scalar(
                     select(ImportBatch).where(ImportBatch.idempotency_key == key)
                 )
-                if existing is not None:
+                if existing is not None and existing.status != "failed":
                     return _summary(session, existing, reused=True)
                 artifact = self._get_or_create_artifact(
                     session, path, artifact_sha256, parsed, context
                 )
-                batch = ImportBatch(
-                    source_artifact=artifact,
-                    provider_id=context.provider_id,
-                    idempotency_key=key,
-                    parser_version=context.parser_version,
-                    status="processing",
-                    initiated_by=context.initiated_by,
-                    import_context=_json_safe(
-                        {
-                            **_context_payload(context),
-                            "context_scope": "batch",
-                            "context_version": 1,
-                            "effective_sheet_names": [
-                                sheet.title for sheet in selected
-                            ],
-                            "workbook_review_reasons": (
-                                parsed.workbook.review_reasons
-                            ),
-                        }
-                    ),
+                if existing is not None:
+                    _revive_failed_batch(existing)
+                    batch = existing
+                else:
+                    batch = ImportBatch(
+                        source_artifact=artifact,
+                        provider_id=context.provider_id,
+                        idempotency_key=key,
+                        parser_version=context.parser_version,
+                        status="processing",
+                        initiated_by=context.initiated_by,
+                    )
+                    session.add(batch)
+                batch.import_context = _json_safe(
+                    {
+                        **_context_payload(context),
+                        "context_scope": "batch",
+                        "context_version": 1,
+                        "effective_sheet_names": [
+                            sheet.title for sheet in selected
+                        ],
+                        "workbook_review_reasons": (
+                            parsed.workbook.review_reasons
+                        ),
+                    }
                 )
-                session.add(batch)
                 session.flush()
                 self._persist_model_results(
                     session, batch, parsed, selected, context, model_plan

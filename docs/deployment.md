@@ -191,8 +191,8 @@ TOKENSQL_QWEN_MAX_TOKENS=8192
 TOKENSQL_QWEN_REASONING_EFFORT=low
 TOKENSQL_QWEN_AUTO_PUBLISH_MIN_CONFIDENCE=0.85
 TOKENSQL_QWEN_MIN_CONFIDENCE=0.75
-TOKENSQL_QWEN_EXTRACTION_VERSION=qwen-extract-v1
-TOKENSQL_QWEN_TABLE_PROMPT_VERSION=qwen-table-v1
+TOKENSQL_QWEN_EXTRACTION_VERSION=qwen-extract-v3
+TOKENSQL_QWEN_TABLE_PROMPT_VERSION=qwen-table-v2
 ```
 
 默认 base URL 是 loopback 的共享 OpenAI 兼容网关；启用前必须现场核实该网关可用、
@@ -218,9 +218,9 @@ model ID 已加载，且不得重启、升级或替换共享模型服务。容�
 模型服务不可用时的运维行为：预检（`GET /v1/models`）或整表理解失败会抛出
 `SemanticImportError`，API 返回 503，批次以 `failed` 状态与错误信息留痕，写事务
 回滚、不产生半写数据；单个行批次的超时/坏响应只把该行送 review，批次转
-`partial`。重试时注意幂等：相同文件+相同上下文（含 prompt 哈希）重放会直接返回
-既有批次（含 failed 批次）而不重跑模型；需要调整参与幂等键的输入（如
-`parser_version` 或 Prompt 文本）才会触发新的导入。`POST /staged-quotes/{id}/re-extract`
+`partial`。重试语义：相同文件+相同上下文（含 prompt 哈希）重放时，成功/部分完成
+的既有批次直接返回而不重跑模型；`failed` 批次则会被复活并重跑导入（幂等键保持
+唯一，错误信息更新）。`POST /staged-quotes/{id}/re-extract`
 可对单条待审核行在网关恢复后重跑抽取。
 
 历史说明：2026-09-23 调查中的 18080 端点与 32B 权重是旧代码占位与历史事实，已不是
