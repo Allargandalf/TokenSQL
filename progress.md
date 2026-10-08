@@ -4,7 +4,7 @@
 
 ## 总体状态
 
-- 当前阶段：新需求文档修订/Agent 交接完成，等待新 Agent 实施 Excel + Prompt → Qwen 整表/逐行理解 → 高置信度自动入库。旧基础版历史验收为 187 tests（2026-09-24），新能力尚未实现。
+- 当前阶段：2026-10-07 Qwen 语义导入已在分支 `qwen-semantic-import` 实现并通过 mock 回归（250 tests）；真实 Strata 元数据与两次小规模真实抽取已实测成功；三份真实样表 + 用户上下文的 API/浏览器/数据库实机闭环验收尚未执行。
 - 项目目录：`<REMOTE_PROJECT_DIR>`。
 - 已确认初始内容：`plan.md` 与 `test/` 下 3 个 Excel 报价样例。
 - Git：2026-10-07 已按用户授权在远端初始化 main；公开个人仓库为 https://github.com/Allargandalf/TokenSQL，仅纳入代码/文档/测试/配置模板，原始报价 Excel 留在远端。实际推送验收见下方 Git 记录。
@@ -28,16 +28,46 @@
 - [x] 确认现有 vendor_context 只是 audit-only，现有 Qwen 只挑模型候选；不能把这些旧能力当成新 Prompt/整表理解已完成。
 - [x] 创建 AGENTS.md 及 docs/agent_handoff.md，供下一位主 Agent 阅读并下发给 Subagent。
 - [x] 更新 README、workflow、环境/数据库设计文档入口，区分历史能力与新目标。
-- [ ] 上传控件旁自由文本 Prompt/Context，并贯通 UI/API/CLI/ImportContext/持久化。
-- [ ] Strata 接口适配、实际模型名核实、真实结构化响应与 coding/报价分析并发实测。
-- [ ] Qwen 整表理解、逐行价格语义抽取、新目录建议与字段证据。
-- [ ] 规则通过的高置信度自动发布/标准化；仅异常 review，改造旧审核/verified 状态机。
-- [ ] 三份真实样表+用户 Context 的 API/浏览器/数据库闭环、超时/重复导入/Prompt 改变回归。
+
+以下勾选为 2026-10-07 实施轮（分支 qwen-semantic-import）状态，证据级别见下一节说明。
+
+- [x] 上传控件旁自由文本 Prompt/Context，并贯通 UI/API/CLI/ImportContext/持久化（mock 测试通过；浏览器实测待做）。
+- [x] Strata 接口适配、实际模型名核实、真实结构化响应小规模实测（元数据 + 2 次小规模真实 JSON 抽取成功；与 coding 任务并发压测待做）。
+- [x] Qwen 整表理解、逐行价格语义抽取、新目录建议与字段证据（mock 测试通过；真实样表全量闭环待做）。
+- [x] 规则通过的高置信度自动发布/标准化；仅异常 review，改造旧审核/verified 状态机（mock 测试通过）。
+- [x] 三份真实样表+用户 Context 的 API/浏览器/数据库闭环、超时/重复导入/Prompt 改变回归（实机完成 2026-10-08；浏览器仅 AppTest，人工交互未做）。
 - [ ] 真实官方网页/Qwen 价格语义抽取；PostgreSQL/容器部署按实际需要单独验收。
 
 模型方向：优先复用 local-coding-agent 的 Strata 标准接口；本轮元数据确认 http://127.0.0.1:8080/v1 与实际 ID qwen3.8-flash-next-iq3_s（4 slots/vision）。用户报告多模态与联网已实测；本轮未发推理请求，bare HTTP 不自动联网，客户端扩展字段/schema 兼容缺口见交接说明。不再要求旧 Qwen-32B 实机验收；27B Flash 仅作为待确认的独立部署备选。
 
-### 本轮验证（2026-10-07）
+## 2026-10-07 Qwen 语义导入实施轮（进行中，未 commit）
+
+分支 `qwen-semantic-import`（基线 main@1827e82）。主 Agent 统筹；实现/review 由 Subagent 分工（本环境无法固定 Subagent 为 gpt-5.6-sol，已用可用 general Subagent 执行并全部由主 Agent 独立复验）。
+
+已完成（代码在工作区，未提交）：
+
+- LLM 层：`llm/semantic.py`（SemanticQwenClient：verify_model 预检、整表理解先于逐行、分批行抽取、json_schema strict + reasoning_effort、进程级按 base URL 共享 max_in_flight=1、trust_env=False、错误分类 timeout/http_status/transport/invalid_json/schema_invalid/empty）；`llm/extraction_schemas.py`（TableUnderstanding/RowExtraction 严格 schema，金额一律字符串）；`llm/client.py` envelope 兼容 Strata 扩展（cached_tokens/timings/reasoning_content，未知 envelope 字段 ignore，业务 JSON 仍严格）；默认 base URL 改 `http://127.0.0.1:8080/v1`、默认 model `qwen3.8-flash-next-iq3_s`。
+- 上下文贯通：ImportContext 新增 prompt_text/context_defaults/interpretation_version；normalize_prompt + prompt_sha256 进入幂等键与 ImportBatch.import_context（context_scope/context_version）；provider_id 仅无 prompt 时必填；API ImportRequest 透传 + `GET /imports/{id}/context`；CLI `--prompt/--prompt-file`、`--profile/--provider-id` 可选、qwen_enabled+prompt 走语义服务；UI 上传旁 Prompt 文本框 + 4 个结构化默认 + 上下文回显（build_import_request 纯函数）。
+- 语义管线 `services/semantic_import_service.py`：模型调用全部在 DB 写事务外；校验门槛（默认 0.85，同时作用于 row 与 model_name/components 字段置信度）、币种白名单与默认填缺不覆盖明示值、单位归一化（百万/千 token 换算）、metric 解析、evidence 坐标（含 sheet 前缀）、conflicts/缺字段/FX 缺失进 review；高置信+规则通过：服务层 get_or_create 目录（alias 不 verified）+ 自动发布（actor=qwen-auto:<model>、validation_method=auto_rules、审计齐全）+ 自动标准化（CNY 直接、外币需 verified FX 且快照观察日对齐 FX 日期）；`reextract_staged_quote` 重抽取异常行；`POST /staged-quotes/{id}/re-extract`（qwen 关闭 409）。
+- 独立 review 修复：provider/manufacturer 默认值不再覆盖明示值且冲突进 review；千 token 换算；低置信行不写目录；envelope extra=ignore；模型阶段移出写事务；normalization 失败容错；prompt 注入防护措辞；UI 空串占位不阻塞侧栏合并。
+
+验证级别（严格区分）：
+
+- mock：`uv run --no-sync pytest -q` = 252 passed（基线 187 + 新增 65）；compileall 通过。全部模型交互为 httpx.MockTransport。
+- 实机（真实 Strata + 真实样表 + 验收 SQLite `var/acceptance.db`，2026-10-08）：
+  - 三份真实 Excel + 中文用户 Context 全链路完成。修正 prompt 后：token折扣.xlsx 5 条自动发布；token折扣(2).xlsx 22/26 自动发布（v3 prompt，API 路径 batch 11）；token报价 (1).xlsx 121 行全部 review（按秒视频报价无对应 billing metric、折扣行未指明作用 metric、低置信度——均为真实歧义，review 是正确结果）。
+  - 自动发布溯源实测：snapshot verified、`publication_idempotency_key=auto:...`、raw_payload 含 `_auto_extraction`（actor=`qwen-auto:qwen3.8-flash-next-iq3_s`、validation_method=auto_rules、prompt_sha256）；组件 raw 6.215 CNY/1,000,000 token；normalization CNY/百万 token 正确；audit_event 记录 `auto_publish_price`/`auto_resolve_catalog_record`（actor qwen-auto）。目录自动创建：5 manufacturers/15 models/1 provider。
+  - 幂等：同文件+同 prompt+同版本重放复用批次（reused_existing=true，0 模型调用）；改 prompt 或改 extraction_version 生成新批次。
+  - 并发探针：两个 SemanticQwenClient 并发 understand_table，max_in_flight=1 串行化（2.8s/6.4s，均成功）。
+  - API 实机（127.0.0.1:8010 + 验收库）：/health ok；POST /imports（prompt 路由语义服务）；GET /imports/{id}/context 返回完整 prompt/sha/defaults/interpretation_version；POST /staged-quotes/414/re-extract 真实重抽取成功（仍 needs_review: manufacturer_missing）。
+  - UI：Streamlit AppTest 对运行中 API 加载无异常，Prompt 文本框与上传控件存在。浏览器人工交互未做（无 chromium）。
+  - 实机发现并修复：models 列表 status 为对象 `{"value":"loaded"}` 导致预检误拒（已修+回归测试）；column_roles.notes 被严格 schema 误拒（已加可选 notes+测试）；prompt v2/v3 澄清"用户上下文澄清表头语义不算冲突"、枚举条件键（新增 variant/resolution）、要求 discount 指明 dimension/direction。
+  - 实机确认正确的 review 行为：表头"折扣"实为折后价的语义冲突由模型主动上报（旧 prompt 下 26/26 review）；offering 身份跨批次冲突 `catalog_conflict` 进 review；按秒报价 metric_unresolved 进 review。
+- 未做：真实官方价采集、PostgreSQL/容器、浏览器人工交互、与 coding 任务同时段压测。
+
+下一步（恢复时按序）：1) 隔离验收库 alembic upgrade + 最小 bootstrap（source+metrics）；2) 三份 test/*.xlsx + 明确中文 Context 跑 SemanticExcelImportService 实机闭环并记录各 Sheet 自动/review/失败数与价格证据；3) 起 API/UI 实测（无 chromium，用 streamlit AppTest + 运行中服务 curl，浏览器人工交互如实标注未做）；4) 并发探针（2 路 TokenSQL 请求 + 网关排队）；5) 全绿后按小任务 commit 到 qwen-semantic-import 并请 review Subagent 复核 git diff 1827e82。
+
+## 2026-10-07 交接轮验证（历史）
 
 - 主 Agent 在远端执行 uv run --no-sync pytest -q：187 passed, 1 warning（10.25 秒）；警告仍为 Starlette/httpx 弃用提示。
 - 本轮无源码/测试/迁移修改；本次回归是旧基础版基线，不是新功能验收。
