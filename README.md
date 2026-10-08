@@ -1,10 +1,14 @@
 # TokenSQL
 
-## 最新接手入口（2026-10-07）
+## 新导入链路已实现（2026-10-07）
 
-当前开发规范见 [plan.md](plan.md)、[progress.md](progress.md)、[AGENTS.md](AGENTS.md) 和 [交接说明](docs/agent_handoff.md)。用户要求改为 Excel + 上传旁 Prompt/Context → Qwen 整表/逐行语义抽取 → 规则校验/标准化 → 高置信度自动入库，仅异常 review；优先复用 Strata 标准模型接口，不用旧 32B。
+新主链路已实现并通过回归测试（240 项 pytest；语义端到端使用 mock 网关，真实模型闭环与浏览器/容器实测状态见 [progress.md](progress.md)）。开发规范与交接见 [plan.md](plan.md)、[progress.md](progress.md)、[AGENTS.md](AGENTS.md) 和 [交接说明](docs/agent_handoff.md)。
 
-本次仅修订文档；以下安装/CLI/人工审核说明描述现有基础版代码，不代表新流程已实现。2026-09-23 的模型服务调查是历史事实，不是今日 Strata 服务状态，也不再是模型选择要求。实施时需同步更新这些说明，不要求普通用户先手工 bootstrap/JSON profile/逐行双重批准。
+已实现链路：Excel 上传旁提供自由文本 Prompt/Context（UI 文本框 + 4 个结构化默认输入 `manufacturer`/`provider_name`/`currency`/`unit_basis`；CLI `--prompt`/`--prompt-file`；API `prompt_text`/`context_defaults`）→ 确定性结构解析 → Qwen 整表理解（先于逐行）→ 分批逐行语义抽取（默认 10 行/批）→ Pydantic/规则校验（币种白名单、单位归一化含百万/千 token 换算、计费 metric 解析、evidence 单元格坐标核验、置信度门槛默认 0.85 同时作用于整行与 `model_name`/`components` 字段、外币需 verified 汇率、冲突与缺字段进 review）→ 高置信度且规则通过的行由服务层自动 get_or_create 目录（manufacturer/provider/model/version/alias（off、unverified）/offering/plan）、自动发布 PriceSnapshot（`verified`，actor `qwen-auto:<model>`，`validation_method=auto_rules`）并自动标准化（CNY 直接；外币使用 verified FX 汇率）；仅低置信度或规则异常行进入 review。
+
+模型走 OpenAI 兼容接口 `POST /v1/chat/completions`（`json_schema` strict + `reasoning_effort`，默认 `low`），默认 base URL `http://127.0.0.1:8080/v1`（仅 loopback，除非 `TOKENSQL_QWEN_ALLOW_REMOTE=true`），启用时 model 必填（当前实测 `qwen3.8-flash-next-iq3_s`）；全部模型调用发生在数据库写事务之外。Prompt/Context 进入两次模型请求与 `ImportBatch.import_context`（`prompt_sha256`、`context_scope`、`context_version`、`semantic.table_understanding` 等）并纳入幂等键；默认值只填缺、不覆盖表内明示值，冲突进 review。旧确定性路径保留：不提供 prompt 时行为与旧版一致。
+
+以下安装/CLI/人工审核说明描述基础版代码；2026-09-23 的模型服务调查是历史事实，不是今日模型服务状态，也不再是模型选择要求。
 
 ## 现有基础版说明（历史实现）
 
@@ -79,6 +83,8 @@ uv run tokensql bootstrap-catalog \
 provider/offering/plan 和 billing metric；未知字段、未知引用或既有记录冲突会使
 整个事务回滚。相同文档再次执行只会返回 `reused`，不会复制记录。命令输出的 `ids.data_sources` 与 `ids.providers` 可供后续 `import-xlsx`
 的 `--source-id` 和 `--provider-id` 使用；示例文件仅是结构模板，生产值必须单独审核。
+语义导入链路会按已校验的抽取结果自动 get_or_create 模型/供应商等目录，但
+`data_source.id` 仍必须来自已审核的 bootstrap 输出。
 
 ## CLI
 
@@ -95,8 +101,22 @@ uv run tokensql profile-xlsx 'test/token报价 (1).xlsx' --json
 uv run tokensql profile-xlsx 'test/token折扣.xlsx' --discount-scale 10
 ```
 
-导入必须引用已经存在且审核过的 `data_source.id` 与 `provider.id`，并提供人工
-确认过的 JSON parser profile。CLI 不会猜测 source/provider ID。示例 profile：
+导入必须引用已经存在且审核过的 `data_source.id`。`--provider-id` 与 `--profile` 现为可选：
+提供自由文本 Prompt 且 Qwen 启用时走语义链路，目录由服务层自动创建/复用，此时可省略
+`--provider-id`；不提供 Prompt 时仍要求 `--provider-id`，并可给出人工确认过的 JSON
+parser profile。CLI 不会猜测 source ID。
+
+语义导入示例（需 `TOKENSQL_QWEN_ENABLED=true` 且已设置 `TOKENSQL_QWEN_MODEL`）：
+
+```bash
+uv run tokensql import-xlsx 'test/token折扣.xlsx' \
+  --source-id <existing-source-id> \
+  --prompt '该表模型厂商为 XX；报价供应商 YY；缺省币种 CNY；价格按每百万 Token' \
+  --parser-version cli-v1
+```
+
+`--prompt-file <file>` 从 UTF-8 文本文件读取 Prompt，与 `--prompt` 互斥。旧确定性路径示例
+（无 Prompt 时行为与旧版一致）：
 
 ```json
 {
@@ -150,9 +170,21 @@ uv run tokensql serve-api --host 127.0.0.1 --port 8000
 uv run tokensql run-ui --host 127.0.0.1 --port 8501
 ```
 
-API 应提供 `GET /health`，交互文档预期位于
-`http://127.0.0.1:8000/docs`。Streamlit 是可选依赖，UI 只是管理入口；所有写入
-仍应经过服务层校验、事务和审计。
+API 提供 `GET /health`（只报告 Qwen enabled/configured，不探测模型），交互文档位于
+`http://127.0.0.1:8000/docs`。语义导入相关端点：
+
+- `POST /imports` 的请求 JSON 支持 `prompt_text` 与 `context_defaults`；`prompt_text`
+  非空且 Qwen 启用时走语义服务，否则走旧确定性路径。模型不可用时返回 503。
+- `GET /imports/{batch_id}/context` 回读批次上下文（`prompt_text`、`prompt_sha256`、
+  `context_defaults`、`semantic.table_understanding` 等），批次不存在返回 404。
+- `POST /staged-quotes/{id}/re-extract` 对单条待审核行重跑语义抽取，通过则自动发布；
+  需 Qwen 启用（否则 409），行不存在 404，已批准或请求体非法分别 409/422，批次缺少
+  已存整表理解时 503。
+
+Streamlit 是可选依赖，UI 只是管理入口；导入页在上传旁提供 Prompt 文本框和 4 个结构化
+默认输入（默认模型厂商/报价供应商/缺省币种/计价单位），自动合并进导入请求，并提供
+"本批次上下文回显"读取 `GET /imports/{id}/context`。所有写入仍应经过服务层校验、
+事务和审计。
 
 这些命令会持续运行服务；验收测试不会调用它们。容器部署见
 `docs/deployment.md`。
@@ -165,7 +197,8 @@ uv run --no-sync pytest -q
 ```
 
 CLI 测试使用 Typer `CliRunner` 和 mock，不会启动 Uvicorn、Streamlit、Docker 或
-Qwen。真实样表测试只读取 `test/` 下的文件。
+Qwen。语义链路测试使用 httpx mock 网关，不调用真实模型服务；真实模型闭环状态见
+progress.md。真实样表测试只读取 `test/` 下的文件。
 
 ## 数据安全边界
 
@@ -173,17 +206,41 @@ Qwen。真实样表测试只读取 `test/` 下的文件。
   Excel 原件以 SHA-256 内容寻址并保存在 `source_artifact.raw_content`；上传
   临时文件删除后仍可由数据库中的原始文件名、哈希和二进制内容复核。
 - 公式不会执行；未知币种、条件价格、空表头、低置信度和不合法模型响应必须待审。
-- Qwen 只能在 Python 提供的候选集合中做语义判断；不得生成主键、连接信息或 SQL。
-- Excel 导入逐行执行目录精确匹配、限定符感知的高置信模糊匹配，再按配置可选调用 Qwen；歧义、低置信、未知或无效响应均创建模型审核项，匹配过程只写 staging，绝不直接发布价格。
+- Qwen 是主要语义抽取者，但没有任何 SQL、数据库 ID 或 DDL 权限：prompt 明确禁止
+  输出 SQL/主键，模型只见单元格坐标与文本；目录创建、价格发布和标准化全部由
+  服务层在事务内校验后执行，模型建议（catalog_suggestions）只是提案。
+- 自动发布有独立审计：actor 记 `qwen-auto:<model>`，审计事件与 staged payload 带
+  `validation_method=auto_rules`、模型名、request id、置信度和 prompt 哈希，与人工
+  发布路径可区分；原件追加写入、历史不覆盖和幂等约束不变。
+- 旧确定性 Excel 路径保留：逐行目录精确/模糊匹配、可选 Qwen 候选匹配，只写
+  staging，绝不直接发布价格。
 - 官方价格采集与 Excel 导入相互独立，且不得用无来源的搜索摘要冒充官方价格。
-  当前 Qwen 仅用于模型候选匹配，没有价格抽取接口；官方 JSON 价格使用确定性映射，
-  价格语义歧义必须人工确认。
+  官方 JSON 价格使用确定性映射，价格语义歧义必须人工确认。
 - 历史价格采用追加写入；不得覆盖已有快照。只有计费维度一致且验证通过的数据可比较。
 - SQLite 适合单机 MVP 和测试；并发/生产部署使用独立 PostgreSQL 16，并执行备份、
   恢复和最小权限验收。
-- 默认 Qwen 关闭，base URL 固定为 `http://127.0.0.1:18080/v1` 的 loopback
-  安全占位；健康检查只报告 enabled/configured，绝不会探测或唤醒 Qwen。
-- 启用时必须显式设置 model；非 loopback 地址还必须显式设置
-  `TOKENSQL_QWEN_ALLOW_REMOTE=true`。超时与最低置信度分别由
-  `TOKENSQL_QWEN_TIMEOUT_SECONDS`、`TOKENSQL_QWEN_MIN_CONFIDENCE` 控制。
-  启用前仍须获得授权并单独验证 schema、并发与故障恢复。
+- 默认 Qwen 关闭，base URL 默认为 `http://127.0.0.1:8080/v1` 的 loopback 地址；
+  非 loopback 必须显式设置 `TOKENSQL_QWEN_ALLOW_REMOTE=true`，否则配置校验拒绝启动。
+  健康检查只报告 enabled/configured，绝不探测或唤醒模型服务。
+- 启用时必须显式设置 model；语义抽取前会先经 `GET /v1/models` 预检确认模型已加载。
+  全部模型调用在数据库写事务之外，失败不会留下半写批次。
+
+## Qwen 配置
+
+全部变量与默认值（见 `src/tokensql/config.py`）：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `TOKENSQL_QWEN_ENABLED` | `false` | 语义导入总开关；关闭时走旧确定性路径 |
+| `TOKENSQL_QWEN_BASE_URL` | `http://127.0.0.1:8080/v1` | OpenAI 兼容网关；默认仅 loopback |
+| `TOKENSQL_QWEN_MODEL` | 无（启用时必填） | 当前实测 `qwen3.8-flash-next-iq3_s` |
+| `TOKENSQL_QWEN_API_KEY` | 无 | 可选 Bearer token，勿写入仓库/日志 |
+| `TOKENSQL_QWEN_ALLOW_REMOTE` | `false` | 非 loopback base URL 必须显式开启 |
+| `TOKENSQL_QWEN_TIMEOUT_SECONDS` | `30`（上限 300） | 每次模型请求超时 |
+| `TOKENSQL_QWEN_MAX_IN_FLIGHT` | `1`（1–8） | 进程级按 base URL 共享的并发上限 |
+| `TOKENSQL_QWEN_MAX_TOKENS` | `8192`（256–32768） | 单次补全最大 token 数 |
+| `TOKENSQL_QWEN_REASONING_EFFORT` | `low` | 可选 `none`/`low`/`medium`/`high` |
+| `TOKENSQL_QWEN_AUTO_PUBLISH_MIN_CONFIDENCE` | `0.85` | 自动发布门槛，作用于整行与 `model_name`/`components` 字段置信度 |
+| `TOKENSQL_QWEN_MIN_CONFIDENCE` | `0.75` | 旧确定性路径的候选匹配门槛 |
+| `TOKENSQL_QWEN_EXTRACTION_VERSION` | `qwen-extract-v1` | 逐行抽取/prompt 版本，进入幂等键与审计 |
+| `TOKENSQL_QWEN_TABLE_PROMPT_VERSION` | `qwen-table-v1` | 整表理解 prompt 版本，记入批次上下文 |

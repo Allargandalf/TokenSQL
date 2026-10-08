@@ -48,3 +48,6 @@ secrets/
 # Original quotation workbooks stay on the remote server
 /test/*.xlsx
 /.private-docs/
+
+# Local acceptance databases, logs, and run scripts
+/var/
