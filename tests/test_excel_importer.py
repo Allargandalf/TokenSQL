@@ -82,9 +82,9 @@ class RealWorkbookTests(unittest.TestCase):
 
     def test_real_sheet_row_counts_and_sha256(self) -> None:
         expected = {
-            "token折扣(2).xlsx": 26,
-            "token折扣.xlsx": 26,
-            "token报价 (1).xlsx": 121,
+            "token折扣(2)_C公司.xlsx": 26,
+            "token折扣_A公司.xlsx": 26,
+            "token报价 (1)_B公司.xlsx": 121,
         }
         for filename, row_count in expected.items():
             with self.subTest(filename=filename):
@@ -94,13 +94,13 @@ class RealWorkbookTests(unittest.TestCase):
                 self.assertEqual(result.workbook.sheets[0].data_row_count, row_count)
 
     def test_header_raw_and_normalized_values_coexist(self) -> None:
-        result = parse_excel(self.fixture_dir / "token折扣.xlsx")
+        result = parse_excel(self.fixture_dir / "token折扣_A公司.xlsx")
         header = result.workbook.sheets[0].header_at_column(2)
         self.assertEqual(header.raw_value, " 模型名称  ")
         self.assertEqual(header.normalized_value, "模型名称")
 
     def test_merges_are_filled_only_with_explicit_provenance(self) -> None:
-        result = parse_excel(self.fixture_dir / "token报价 (1).xlsx")
+        result = parse_excel(self.fixture_dir / "token报价 (1)_B公司.xlsx")
         sheet = result.workbook.sheets[0]
         self.assertEqual(len(sheet.merge_ranges), 20)
 
@@ -114,7 +114,7 @@ class RealWorkbookTests(unittest.TestCase):
         self.assertEqual(unmerged.source_coordinate, "C3")
 
     def test_empty_e_header_and_array_formulas_are_reviewed(self) -> None:
-        result = parse_excel(self.fixture_dir / "token报价 (1).xlsx")
+        result = parse_excel(self.fixture_dir / "token报价 (1)_B公司.xlsx")
         sheet = result.workbook.sheets[0]
         header = sheet.header_at_column(5)
         self.assertIsNone(header.raw_value)
@@ -132,7 +132,7 @@ class RealWorkbookTests(unittest.TestCase):
 
     def test_normal_shared_and_array_formula_metadata(self) -> None:
         discount = parse_excel(
-            self.fixture_dir / "token折扣.xlsx",
+            self.fixture_dir / "token折扣_A公司.xlsx",
             ParserProfile(discount_scale=10),
         ).workbook.sheets[0]
         self.assertEqual(discount.cell("C2").formula_kind, FormulaKind.NORMAL)
@@ -143,11 +143,11 @@ class RealWorkbookTests(unittest.TestCase):
         self.assertTrue(discount.cell("C4").formula_text)
         self.assertIsNotNone(discount.cell("C4").cached_value)
 
-        quote = parse_excel(self.fixture_dir / "token报价 (1).xlsx").workbook.sheets[0]
+        quote = parse_excel(self.fixture_dir / "token报价 (1)_B公司.xlsx").workbook.sheets[0]
         self.assertEqual(quote.cell("E2").formula_kind, FormulaKind.ARRAY)
 
     def test_real_quote_classification_counts(self) -> None:
-        result = parse_excel(self.fixture_dir / "token报价 (1).xlsx")
+        result = parse_excel(self.fixture_dir / "token报价 (1)_B公司.xlsx")
         counts = Counter(item.parsed_price.kind for item in result.staged_quotes)
         self.assertEqual(counts[PriceKind.DISCOUNT], 31)
         self.assertEqual(counts[PriceKind.CNY_PER_SECOND], 66)
@@ -168,7 +168,7 @@ class RealWorkbookTests(unittest.TestCase):
 
     def test_discount_workbooks_need_explicit_profile(self) -> None:
         profile = ParserProfile(discount_scale=10)
-        for filename in ("token折扣.xlsx", "token折扣(2).xlsx"):
+        for filename in ("token折扣_A公司.xlsx", "token折扣(2)_C公司.xlsx"):
             with self.subTest(filename=filename):
                 result = parse_excel(self.fixture_dir / filename, profile)
                 self.assertEqual(len(result.staged_quotes), 52)

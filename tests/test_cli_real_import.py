@@ -24,7 +24,7 @@ def test_real_workbook_cli_import_from_fresh_migrated_catalog(tmp_path):
     profile = tmp_path / "profile.json"
     profile.write_text('{"discount_scale": 10}', encoding="utf-8")
     args = [
-        "import-xlsx", str(root / "test/token折扣.xlsx"),
+        "import-xlsx", str(root / "test/token折扣_A公司.xlsx"),
         "--source-id", str(ids["data_sources"]["supplier-xlsx"]),
         "--provider-id", str(ids["providers"]["example-provider"]),
         "--profile", str(profile), "--database-url", url,
@@ -38,4 +38,4 @@ def test_real_workbook_cli_import_from_fresh_migrated_catalog(tmp_path):
         assert connection.execute("SELECT count(*) FROM staged_quote").fetchone()[0] == 26
         assert connection.execute("SELECT count(*) FROM price_snapshot").fetchone()[0] == 0
         original = connection.execute("SELECT raw_content FROM source_artifact").fetchone()[0]
-        assert original == (root / "test/token折扣.xlsx").read_bytes()
+        assert original == (root / "test/token折扣_A公司.xlsx").read_bytes()

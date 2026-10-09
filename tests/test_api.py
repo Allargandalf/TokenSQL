@@ -929,7 +929,7 @@ def test_verified_management_workflow_and_trust_boundaries(api) -> None:
 
 def test_real_excel_api_confirmation_review_publish_normalize_compare_csv(api) -> None:
     client, ids = api
-    workbook_path = Path(__file__).resolve().parents[1] / "test" / "token报价 (1).xlsx"
+    workbook_path = Path(__file__).resolve().parents[1] / "test" / "token报价 (1)_B公司.xlsx"
     workbook_bytes = workbook_path.read_bytes()
     imported = client.post(
         "/imports",

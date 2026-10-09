@@ -98,7 +98,7 @@ def test_real_discount_workbooks_stage_every_row_and_candidate(
         profile=ParserProfile(discount_scale=10),
     )
 
-    for filename in ("token折扣.xlsx", "token折扣(2).xlsx"):
+    for filename in ("token折扣_A公司.xlsx", "token折扣(2)_C公司.xlsx"):
         summary = service.import_file(session, FIXTURES / filename, context)
         assert summary.total_rows == 26
         assert summary.staged_quote_count == 26
@@ -122,7 +122,7 @@ def test_real_quote_reviews_and_full_cell_provenance(
 ) -> None:
     summary = ExcelImportService().import_file(
         session,
-        FIXTURES / "token报价 (1).xlsx",
+        FIXTURES / "token报价 (1)_B公司.xlsx",
         _context(source_and_provider),
     )
 
@@ -150,12 +150,12 @@ def test_real_quote_reviews_and_full_cell_provenance(
     assert cells["E3"]["header"]["normalized_value"] == ""
     assert len(merged_row.row_hash) == 64
     artifact = session.get(SourceArtifact, summary.source_artifact_id)
-    assert artifact.raw_content == (FIXTURES / "token报价 (1).xlsx").read_bytes()
+    assert artifact.raw_content == (FIXTURES / "token报价 (1)_B公司.xlsx").read_bytes()
     assert artifact.uri == f"urn:sha256:{artifact.sha256}"
     assert artifact.storage_uri == (
         f"db://source-artifact/sha256/{artifact.sha256}"
     )
-    assert artifact.original_filename == "token报价 (1).xlsx"
+    assert artifact.original_filename == "token报价 (1)_B公司.xlsx"
     assert session.scalar(select(func.count(PriceSnapshot.id))) == 0
 
 
@@ -167,7 +167,7 @@ def test_same_idempotency_key_returns_original_batch_without_new_rows(
         source_and_provider,
         profile=ParserProfile(discount_scale=10),
     )
-    path = FIXTURES / "token折扣(2).xlsx"
+    path = FIXTURES / "token折扣(2)_C公司.xlsx"
 
     first = service.import_file(session, path, context)
     second = service.import_file(session, path, context)
@@ -185,7 +185,7 @@ def test_profile_and_parser_version_are_part_of_idempotency(
     session: Session, source_and_provider: tuple[int, int]
 ) -> None:
     service = ExcelImportService()
-    path = FIXTURES / "token折扣(2).xlsx"
+    path = FIXTURES / "token折扣(2)_C公司.xlsx"
     plain = service.import_file(session, path, _context(source_and_provider))
     scaled = service.import_file(
         session,
@@ -254,7 +254,7 @@ def test_missing_provider_context_is_rejected_before_artifact_creation(
     with pytest.raises(ValueError, match="provider_id is required"):
         ExcelImportService().import_file(
             session,
-            FIXTURES / "token折扣(2).xlsx",
+            FIXTURES / "token折扣(2)_C公司.xlsx",
             _context(
                 source_and_provider,
                 profile=ParserProfile(discount_scale=10),
@@ -278,7 +278,7 @@ def test_unknown_provider_context_is_rejected_before_parsing(
     )
     with pytest.raises(ValueError, match="unknown provider_id"):
         ExcelImportService().import_file(
-            session, FIXTURES / "token折扣(2).xlsx", context
+            session, FIXTURES / "token折扣(2)_C公司.xlsx", context
         )
     assert session.scalar(select(func.count(ImportBatch.id))) == 0
     assert session.scalar(select(func.count(SourceArtifact.id))) == 0
@@ -307,7 +307,7 @@ def test_official_source_is_rejected_for_excel_import(
 
     with pytest.raises(ValueError, match="OfficialPriceService"):
         ExcelImportService().import_file(
-            session, FIXTURES / "token折扣(2).xlsx", context
+            session, FIXTURES / "token折扣(2)_C公司.xlsx", context
         )
 
     assert session.scalar(select(func.count(ImportBatch.id))) == 0
@@ -326,7 +326,7 @@ def test_parse_failure_rolls_back_partial_work_and_is_audited(
     with pytest.raises(RuntimeError, match="synthetic parser failure"):
         ExcelImportService().import_file(
             session,
-            FIXTURES / "token折扣(2).xlsx",
+            FIXTURES / "token折扣(2)_C公司.xlsx",
             _context(
                 source_and_provider,
                 profile=ParserProfile(discount_scale=10),
@@ -405,7 +405,7 @@ def test_real_workbook_runs_catalog_exact_matching_without_publication(
 
     summary = ExcelImportService().import_file(
         session,
-        FIXTURES / "token折扣.xlsx",
+        FIXTURES / "token折扣_A公司.xlsx",
         _context(
             source_and_provider,
             profile=ParserProfile(discount_scale=10),
