@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>TokenSQL · 报价工作台</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="rail" aria-label="主导航">
+      <a class="brand-mark" href="/workspace" aria-label="TokenSQL 首页">T</a>
+      <nav><a class="rail-button is-active" href="/workspace" aria-label="报价工作台" title="报价工作台"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5.5h16v13H4zM4 10h16M9 5.5v13"/></svg></a></nav>
+      <span class="rail-spacer"></span>
+      <span class="health-dot" id="globalHealth" title="正在连接服务"></span>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div><p class="eyebrow">TOKENSQL WORKSPACE</p><h1>模型报价</h1></div>
+        <div class="topbar-actions">
+          <span class="sync-label" id="syncLabel">正在同步…</span>
+          <button class="button secondary" id="refreshButton" type="button"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg>刷新</button>
+          <button class="button primary" id="importButton" type="button"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 16V4m0 0L7 9m5-5 5 5M4 15v5h16v-5"/></svg>导入文件</button>
+          <input id="filePicker" type="file" multiple hidden accept=".xlsx,.xls,.csv,.tsv,.json,.pdf,image/*">
+        </div>
+      </header>
+
+      <div class="content-grid">
+        <section class="data-panel" aria-label="报价数据">
+          <div class="panel-toolbar">
+            <label class="search-control"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><input id="searchInput" type="search" placeholder="搜索模型、厂商或来源…" autocomplete="off"></label>
+            <div class="filters" id="filters">
+              <select id="manufacturerFilter" aria-label="按厂商筛选"><option value="">全部厂商</option></select>
+              <select id="providerFilter" aria-label="按供应商筛选"><option value="">全部供应商</option></select>
+              <select id="currencyFilter" aria-label="按币种筛选"><option value="">全部币种</option></select>
+              <select id="metricFilter" aria-label="按计费项筛选"><option value="">全部计费项</option></select>
+              <select id="dimensionFilter" aria-label="按维度筛选"><option value="">全部维度</option></select>
+            </div>
+            <button class="icon-button" id="clearFiltersButton" type="button" title="清除筛选" aria-label="清除筛选"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17"/></svg></button>
+          </div>
+
+          <div class="selection-bar" id="selectionBar" hidden>
+            <span><strong id="selectedCount">0</strong> 条已选择</span>
+            <button class="text-button" id="exportSelectedButton" type="button">导出所选</button>
+            <button class="text-button" id="clearSelectionButton" type="button">取消选择</button>
+          </div>
+
+          <div class="table-wrap" id="tableWrap">
+            <table class="data-table">
+              <thead><tr>
+                <th class="check-cell"><input id="selectAll" type="checkbox" aria-label="选择当前页全部报价"></th>
+                <th>模型</th><th>厂商</th><th>供应商</th><th>计费项</th><th class="number-cell">单价 / 折扣</th><th>币种 / 单位</th><th>生效日期</th><th>来源</th><th class="action-cell"></th>
+              </tr></thead>
+              <tbody id="quoteRows"></tbody>
+            </table>
+            <div class="state-card" id="tableState" hidden></div>
+          </div>
+
+          <footer class="table-footer">
+            <span id="resultCount">0 条报价</span>
+            <div class="footer-actions">
+              <button class="button ghost small" id="newQuoteButton" type="button">+ 新增报价</button>
+              <button class="button ghost small" id="exportFilteredButton" type="button">导出当前筛选</button>
+              <select class="format-select" id="exportFormat" aria-label="导出格式"><option value="xlsx">XLSX</option><option value="csv">CSV</option></select>
+              <span class="divider"></span>
+              <button class="icon-button" id="previousPageButton" type="button" aria-label="上一页">‹</button>
+              <span id="pageLabel">1 / 1</span>
+              <button class="icon-button" id="nextPageButton" type="button" aria-label="下一页">›</button>
+            </div>
+          </footer>
+        </section>
+
+        <aside class="agent-panel" aria-labelledby="agentHeading">
+          <header class="agent-header">
+            <div class="agent-avatar">OC</div>
+            <div>
+              <div class="agent-title-row"><h2 id="agentHeading">OpenCode</h2><span class="status-pill" id="agentStatus"><i></i>连接中</span></div>
+              <p>直接维护报价数据库</p>
+            </div>
+          </header>
+          <div class="conversation" id="conversation" aria-live="polite">
+            <article class="message assistant">
+              <div class="message-label">OPENCODE</div>
+              <div class="message-body">
+                <p>把 Excel 或其他资料拖到这里，再说明表格含义和你希望如何写入。我会分析文件并直接更新报价库。</p>
+                <div class="example-prompts">
+                  <button type="button" data-prompt="导入附件中的报价。厂商、供应商、币种和计价单位以文件及我提供的上下文为准；未明确的内容先向我说明，不要猜测。">导入供应商报价</button>
+                  <button type="button" data-prompt="检查这个文件中的模型报价，与数据库现有记录比较，更新发生变化的价格。">比较并更新价格</button>
+                </div>
+              </div>
+            </article>
+          </div>
+          <div class="composer" id="composer">
+            <div class="drop-hint" id="dropHint">松开即可添加文件</div>
+            <div class="file-chips" id="fileChips"></div>
+            <textarea id="promptInput" rows="3" placeholder="输入指令，或拖入 / 粘贴文件…" aria-label="给 OpenCode 的指令"></textarea>
+            <div class="composer-footer">
+              <div><button class="icon-button" id="attachButton" type="button" aria-label="添加文件" title="添加文件"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9 12 5.5-5.5a3 3 0 0 1 4.2 4.2l-7.8 7.8a5 5 0 0 1-7.1-7.1l7.4-7.4"/></svg></button><span class="shortcut">Enter 发送 · Shift+Enter 换行</span></div>
+              <button class="send-button" id="sendButton" type="button" aria-label="发送"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m5 12 14-7-4.8 14-2.7-5.5L5 12Zm6.5 1.5 3-3"/></svg></button>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </main>
+  </div>
+
+  <dialog class="editor-dialog" id="editorDialog">
+    <form method="dialog" id="quoteForm">
+      <header><div><p class="eyebrow">PRICE RECORD</p><h2 id="editorTitle">编辑报价</h2></div><button class="icon-button" type="button" data-close-editor aria-label="关闭">×</button></header>
+      <div class="form-grid">
+        <label class="wide">模型名称<input name="model_name" required></label>
+        <label>模型版本<input name="model_version"></label>
+        <label>厂商<input name="manufacturer"></label>
+        <label>供应商<input name="provider" required></label>
+        <label>供应商类型<select name="provider_type"><option value="unknown">未指定</option><option value="official">官方</option><option value="reseller">经销商</option><option value="aggregator">聚合商</option><option value="internal">内部</option></select></label>
+        <label>价格类型<select name="component_type"><option value="monetary">金额</option><option value="discount">折扣</option></select></label>
+        <label data-money-field>价格<input name="amount" inputmode="decimal"></label>
+        <label data-discount-field hidden>折扣率（0.31 = 3.1 折）<input name="discount_rate" inputmode="decimal"></label>
+        <label>币种<input name="currency" maxlength="3" required></label>
+        <label>单位<input name="unit" required></label>
+        <label>单位数量<input name="unit_quantity" inputmode="decimal" required></label>
+        <label>计费项<input name="metric" required></label>
+        <label>计费维度<input name="dimension" placeholder="token / time / image"></label>
+        <label>方向<select name="direction"><option value="input">输入</option><option value="output">输出</option><option value="cached_input">缓存输入</option><option value="other">其他</option></select></label>
+        <label>生效日期<input name="effective_date" type="date"></label>
+        <label>来源<input name="source"></label>
+        <label>来源引用<input name="source_ref" placeholder="工作表、URL 或单元格"></label>
+        <label class="wide">条件（JSON）<textarea name="conditions" rows="3">{}</textarea></label>
+        <label class="wide">备注<textarea name="note" rows="3"></textarea></label>
+      </div>
+      <p class="form-error" id="formError" role="alert"></p>
+      <footer><button class="button secondary" type="button" data-close-editor>取消</button><button class="button primary" id="saveQuoteButton" type="submit">保存</button></footer>
+    </form>
+  </dialog>
+
+  <div class="toast-region" id="toastRegion" aria-live="polite"></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

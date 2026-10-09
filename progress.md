@@ -1,8 +1,37 @@
 # TokenSQL 开发进度
 
-最后更新：2026-10-07（Asia/Hong_Kong）
+最后更新：2026-10-09（Asia/Hong_Kong）
 
-## 总体状态
+## 2026-10-09 OpenCode 报价工作台（已实现与验收）
+
+- 用户已改为少量 Excel 由 OpenCode 通过文件 + Prompt 直接维护数据库；旧多阶段语义导入保留兼容，不是本轮主流程。
+- 已从 main@6248325 创建 agent-workspace；初始工作树干净。主 Agent 分工数据 store、前端与 OpenCode 集成，独立核验。
+- 所有实现/测试/服务只在远端，不读取 handoff，不更改共享 Strata 或 coding 服务。
+- 已实测 OpenCode 1.18.34 独立服务支持 health、session、prompt_async、message、event；xlsx 可由 Agent 的 Python/openpyxl 工具直接读取。
+- [x] 报价 store、事务修改记录、筛选/编辑/CSV 与 XLSX 导出。
+- [x] 左侧数据表与右侧真实 OpenCode 聊天，拖放/粘贴附件。
+- [x] 独立后台 Agent 会话直接写报价库，完成后表格刷新。
+- [x] 数据接口回归、真实 OpenCode 文件写库、浏览器交互验收。
+- [x] 启动服务与 SSH 转发使用说明。
+
+验收证据（严格区分）：
+
+- 主 Agent 独立执行完整回归：274 passed，1 条既有 Starlette/httpx 弃用 warning；JS 语法、git diff 检查通过。
+- 真实 OpenCode 1.18.34 + Strata：生成的两行 XLSX 写入四条正确报价；后续真实浏览器只读聊天 POST 202/completed、实际 0 修改。
+- 真实网页全链路：选择生成 XLSX + 明确 Prompt → POST 202 → OpenCode 写临时库 → 表格自动刷新为 4 条，耗时 23.4 秒，仅一次请求无重试。主 Agent 只读 SQLite 独立核对四组模型/方向/金额、CNY、供应商、百万 token 单位、B2/C2/B3/C3 来源及四条 added 审计，全部精确匹配。正式新库前后仍为空。
+- 浏览器交互：分页/跨页勾选、筛选后清除隐藏选择、金额编辑、折扣切换、Enter 编辑、当前/选中 XLSX 与模型 CSV 导出、文件 chip、桌面 2:1 和窄屏上下布局均通过。主 Agent 亲自检查远端截图。
+- 可重复只读浏览器回归 `tools/workspace_browser_smoke.py`：实际点击发送、tool 摘要、failed 后真实 changes 显示与刷新、页面错误监听通过，不写业务库。真实请求验收无 pageerror/console error。
+- 证据位于 ignored `var/workspace-evidence/`：`opencode-smoke-2026-10-09.json`、`browser-2026-10-09.json` 与截图。仅生成样表，不代表全部真实业务 Excel 都已验证。
+
+终审修复：虚拟环境 Python symlink 误解析、上传失败遗留 busy、80 MiB 合计容量限制、模型 HTTP 200 error 响应、SIGTERM 子进程清理、Enter 误提交、聊天发送未定义变量、failed 已写库不刷新、审计汇总前提前公布 completed。追加慢审计和 shutdown 取消回归。Subagent 最终复核未见剩余 Blocker/Major。
+
+交付：HTTP 8765 + 独立 OpenCode 8766 均仅监听 loopback，最新服务 health/agent ready 实测通过；自己启动的临时 8785 已关闭。新报价库 `var/workspace/quotes.sqlite3` 初始为空，原 Excel/旧价格库/验收库保留。代码提交在 `agent-workspace`；本轮不推送、不创建 release。启动与 SSH 转发见 `docs/workspace.md`。
+
+边界：全部实现、依赖、浏览器、测试和服务在远端，无本机项目文件写入；不读取 handoff，不调整共享服务。尚未全量验收真实业务表、与 coding 任务同时段压力、官方价采集或 PostgreSQL/容器；不将这些未做项当成本轮网页已交付功能。
+
+以下记录保留历史；最新验收以本节最终追加结果为准。
+
+## 总体状态（以下为历史记录）
 
 - 当前阶段：2026-10-07 Qwen 语义导入已在分支 `qwen-semantic-import` 实现并通过 mock 回归（250 tests）；真实 Strata 元数据与两次小规模真实抽取已实测成功；三份真实样表 + 用户上下文的 API/浏览器/数据库实机闭环验收尚未执行。
 - 项目目录：`<REMOTE_PROJECT_DIR>`。

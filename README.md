@@ -1,6 +1,24 @@
 # TokenSQL
 
-## 新导入链路已实现（2026-10-07）
+## 当前入口：报价工作台（2026-10-09）
+
+网页左侧约 2/3 是可筛选、直接编辑和导出的报价表；右侧约 1/3 是真实 OpenCode 聊天。拖入 Excel/CSV 或粘贴文件，输入厂商、供应商、币种、计费单位等 Prompt，Agent 使用工具读取附件、查询已有报价并直接维护数据库。无需配置 parser profile，也不要求固定的整表理解/逐行语义抽取流程。
+
+支持新增报价、金额/折扣编辑、按厂商/供应商/币种/计费项筛选，以及 CSV/XLSX 的当前筛选、勾选条目、某模型全部报价导出。后台 Agent 完成后自动刷新表格；人工编辑与 Agent 写入都保留修改记录和版本检查。
+
+在远端项目目录启动（使用现有真实 OpenCode executable 和 provider JSON 的路径）：
+
+```bash
+.venv/bin/python -m tokensql.workspace.runtime \
+  --opencode-bin "$TOKENSQL_OPENCODE_BIN" \
+  --provider-config "$TOKENSQL_OPENCODE_CONFIG"
+```
+
+默认 HTTP 端口 8765、独立 OpenCode 端口 8766，均监听 loopback。客户端执行 `ssh -N -L 8765:127.0.0.1:8765 user@<REMOTE_HOST>`，再在浏览器打开 `http://127.0.0.1:8765`。所有文件与数据库仍留在远端。
+
+新报价库默认为 `var/workspace/quotes.sqlite3`，初始为空，旧原件/价格/验收库保留。完整启动、数据库迁移、Agent 使用与验证说明见 [工作台文档](docs/workspace.md)。当前状态与实测证据见 [progress.md](progress.md)。
+
+## 旧语义导入功能（兼容保留，2026-10-07）
 
 新主链路已实现并通过回归测试（240 项 pytest；语义端到端使用 mock 网关，真实模型闭环与浏览器/容器实测状态见 [progress.md](progress.md)）。开发规范与交接见 [plan.md](plan.md)、[progress.md](progress.md)、[AGENTS.md](AGENTS.md) 和 [交接说明](docs/agent_handoff.md)。
 

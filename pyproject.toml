@@ -29,9 +29,11 @@ test = [
   "pytest-cov>=5.0,<7.0",
 ]
 ui = ["streamlit>=1.36,<2.0"]
+browser = ["playwright>=1.49,<2.0"]
 
 [project.scripts]
 tokensql = "tokensql.cli:app"
+tokensql-workspace = "tokensql.workspace.runtime:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tokensql"]

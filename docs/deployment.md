@@ -1,5 +1,11 @@
 # TokenSQL 部署说明
 
+## 2026-10-09 网页工作台
+
+当前默认入口是同源的报价表 + OpenCode 聊天网页，宿主机运行独立 HTTP/OpenCode 服务，通过 SSH 转发访问，SQLite 足以完成当前少量报价维护。配置、启动、附件目录及备份见 [工作台部署](workspace.md)。无需 Docker/PostgreSQL 或旧 parser profile 即可使用。
+
+以下章节描述旧 API/Streamlit 与数据库部署历史，不是新工作台的前置条件；本轮实际启动与验收以 progress.md 最新记录为准。
+
 > 2026-10-07 接手提示：Qwen 语义导入链路已实现，第 6 节已按实现更新环境变量与运维说明，规范见 [新版计划](../plan.md) 与 [交接说明](agent_handoff.md)。第 6 节保留的 18080/32B 是历史调查占位，不是当前模型选择；当前默认 base URL 为 http://127.0.0.1:8080/v1（loopback），实测 model ID 为 qwen3.8-flash-next-iq3_s，启用前仍须现场核实共享网关可用，不部署旧 32B、不重启共享服务。普通导入不再以第 4 节的 JSON profile/全人工批准作为产品要求；无 Prompt 时仍走旧确定性路径。
 
 本文描述可执行的部署路径，不代表已经部署。本次交付没有构建镜像、拉取镜像、创建

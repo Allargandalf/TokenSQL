@@ -1,0 +1,12 @@
+---
+description: TokenSQL remote workspace development and OpenCode maintenance
+alwaysApply: true
+---
+
+Follow the current plan.md and AGENTS.md. The primary experience is a quote grid beside an OpenCode chat, with files and a prompt sent directly to the agent for database maintenance.
+
+All project changes and tests run on the authorized remote server. Do not create local project copies, read handoff/private handoff documents, or alter shared coding/model services.
+
+Use the workspace store for validated transactional quote writes and audit records. Preserve original files, existing databases and unrelated changes. Keep agent jobs asynchronous so the quote grid stays responsive.
+
+Record actual test and deployment evidence in progress.md. Do not treat mock results as real model or browser acceptance.
