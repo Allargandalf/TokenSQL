@@ -206,7 +206,7 @@ def test_server_error_is_review_without_retry() -> None:
     assert result.review_reason is ReviewReason.SERVER_ERROR
 
 
-def test_invalid_json_and_extra_envelope_are_review() -> None:
+def test_invalid_json_and_extra_envelope_fields_are_handled() -> None:
     responses = iter(
         [
             httpx.Response(200, content=b"not-json"),
@@ -224,6 +224,18 @@ def test_invalid_json_and_extra_envelope_are_review() -> None:
                     "unexpected": True,
                 },
             ),
+            httpx.Response(
+                200,
+                json=_completion(
+                    {
+                        "candidate_index": 0,
+                        "confidence": 0.9,
+                        "reason": "valid",
+                        "abstain": False,
+                        "database_id": 7,
+                    }
+                ),
+            ),
         ]
     )
 
@@ -237,8 +249,14 @@ def test_invalid_json_and_extra_envelope_are_review() -> None:
         extra_envelope = client.select_candidate(
             "qwen", [ModelCandidate(canonical_name="Qwen")]
         )
+        extra_business_field = client.select_candidate(
+            "qwen", [ModelCandidate(canonical_name="Qwen")]
+        )
     assert invalid_json.review_reason is ReviewReason.INVALID_JSON
-    assert extra_envelope.review_reason is ReviewReason.INVALID_RESPONSE
+    # Unknown gateway envelope extensions are tolerated by design.
+    assert not extra_envelope.review_required
+    # Unknown fields inside the business selection JSON stay rejected.
+    assert extra_business_field.review_reason is ReviewReason.INVALID_RESPONSE
 
 
 def test_settings_factory_is_disabled_loopback_and_has_no_fake_key(monkeypatch) -> None:
@@ -246,7 +264,7 @@ def test_settings_factory_is_disabled_loopback_and_has_no_fake_key(monkeypatch) 
 
     settings = Settings(_env_file=None)
     assert settings.qwen_enabled is False
-    assert settings.qwen_base_url == "http://127.0.0.1:18080/v1"
+    assert settings.qwen_base_url == "http://127.0.0.1:8080/v1"
     assert settings.qwen_api_key is None
     config = QwenClientConfig.from_settings(settings)
     assert config.base_url == settings.qwen_base_url
@@ -270,3 +288,40 @@ def test_settings_require_model_when_qwen_is_enabled() -> None:
 
     with pytest.raises(ValueError, match="QWEN_MODEL"):
         Settings(_env_file=None, qwen_enabled=True, qwen_model=None)
+
+
+def test_extended_gateway_envelope_is_accepted() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "candidate_index": 0,
+                                    "confidence": 0.95,
+                                    "reason": "gateway extension fields",
+                                    "abstain": False,
+                                }
+                            ),
+                            "reasoning_content": "内部推理内容",
+                        }
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                    "total_tokens": 150,
+                    "prompt_tokens_details": {"cached_tokens": 80},
+                },
+                "timings": {"total_ms": 300},
+            },
+        )
+
+    with _client(handler) as client:
+        result = client.select_candidate("qwen", [ModelCandidate(canonical_name="Qwen")])
+    assert not result.review_required
+    assert result.selection is not None
+    assert result.selection.candidate_index == 0

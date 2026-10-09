@@ -97,10 +97,59 @@ def _render_health(st: Any, health: Mapping[str, Any]) -> None:
         st.warning(f"Qwen 当前不可用{suffix}。仍可预览，歧义项必须人工审核。")
 
 
+def build_import_request(
+    base_request: dict[str, Any],
+    prompt_text: str,
+    defaults: Mapping[str, str],
+) -> dict[str, Any]:
+    """Merge the sidebar prompt and structured defaults into an import request.
+
+    Explicit non-empty ``prompt_text``/``context_defaults`` already present in
+    the JSON request win over the sidebar widgets; empty placeholders do not.
+    """
+    request = dict(base_request)
+    explicit_prompt = request.get("prompt_text")
+    has_explicit_prompt = isinstance(explicit_prompt, str) and explicit_prompt.strip()
+    if prompt_text.strip() and not has_explicit_prompt:
+        request["prompt_text"] = prompt_text
+    merged_defaults = {
+        key: value.strip()
+        for key, value in defaults.items()
+        if isinstance(value, str) and value.strip()
+    }
+    explicit_defaults = request.get("context_defaults")
+    has_explicit_defaults = isinstance(explicit_defaults, Mapping) and bool(explicit_defaults)
+    if merged_defaults and not has_explicit_defaults:
+        request["context_defaults"] = merged_defaults
+    return request
+
+
 def _render_import(st: Any, client: TokenSQLClient) -> None:
     st.subheader("Excel 导入")
     st.caption("仅接受 .xlsx；预览不会写库，必须再次点击“确认导入”。")
     uploaded = st.file_uploader("选择报价文件", type=["xlsx"])
+    prompt_text = st.text_area(
+        "导入说明 / Prompt（自由文本）",
+        key="import_prompt",
+        height=140,
+        help=(
+            "例如：该表模型厂商为 XX；报价供应商为 YY；缺省币种 CNY；"
+            "价格按每百万 Token；B/C 列分别为输入/输出；生效日期 YYYY-MM-DD。"
+        ),
+    )
+    manufacturer_col, provider_col, currency_col, unit_col = st.columns(4)
+    default_manufacturer = manufacturer_col.text_input(
+        "默认模型厂商", key="context_manufacturer"
+    )
+    default_provider = provider_col.text_input(
+        "报价供应商", key="context_provider_name"
+    )
+    default_currency = currency_col.text_input(
+        "缺省币种", key="context_currency"
+    )
+    default_unit_basis = unit_col.text_input(
+        "计价单位", key="context_unit_basis"
+    )
     context_text = st.text_area(
         "预览上下文（JSON）",
         value="{}",
@@ -110,6 +159,30 @@ def _render_import(st: Any, client: TokenSQLClient) -> None:
             "price_headers。"
         ),
     )
+    _render_import_flow(
+        st,
+        client,
+        uploaded,
+        context_text,
+        prompt_text,
+        {
+            "manufacturer": default_manufacturer,
+            "provider_name": default_provider,
+            "currency": default_currency,
+            "unit_basis": default_unit_basis,
+        },
+    )
+    _render_batch_context(st, client)
+
+
+def _render_import_flow(
+    st: Any,
+    client: TokenSQLClient,
+    uploaded: Any,
+    context_text: str,
+    prompt_text: str,
+    structured_defaults: Mapping[str, str],
+) -> None:
     if uploaded is None:
         return
 
@@ -152,7 +225,8 @@ def _render_import(st: Any, client: TokenSQLClient) -> None:
         height=180,
         help=(
             "data_source_id 与 parser_version 必填；可选 profile、sheet_names、"
-            "provider_id、vendor_context、initiated_by。"
+            "provider_id、vendor_context、initiated_by、prompt_text、"
+            "context_defaults。上方 Prompt 与结构化默认会自动合并进来。"
         ),
     )
     st.warning("确认导入会创建导入批次；不确定项将进入人工审核。")
@@ -163,6 +237,9 @@ def _render_import(st: Any, client: TokenSQLClient) -> None:
                 raise RequestValidationError("data_source_id is required")
             if not request.get("parser_version"):
                 raise RequestValidationError("parser_version is required")
+            request = build_import_request(
+                request, prompt_text, structured_defaults
+            )
             result = client.import_workbook(
                 uploaded.name,
                 content,
@@ -173,6 +250,33 @@ def _render_import(st: Any, client: TokenSQLClient) -> None:
         else:
             st.success("导入请求已完成")
             st.json(result)
+            batch_id = result.get("batch_id")
+            if isinstance(batch_id, int):
+                st.session_state["_tokensql_last_batch_id"] = batch_id
+
+
+def _render_batch_context(st: Any, client: TokenSQLClient) -> None:
+    with st.expander("本批次上下文回显"):
+        batch_id = st.session_state.get("_tokensql_last_batch_id")
+        if batch_id is None:
+            raw = st.text_input("批次 ID", key="context_batch_id")
+            if not raw.strip():
+                st.info("本会话尚无导入批次；输入批次 ID 可查看其上下文。")
+                return
+            try:
+                batch_id = _required_int(raw, "批次 ID")
+            except RequestValidationError as exc:
+                st.error(str(exc))
+                return
+        try:
+            context = client.get_import_context(batch_id)
+        except TokenSQLClientError as exc:
+            _display_error(st, exc)
+            return
+        st.write(f"批次 {batch_id} prompt_text：")
+        st.code(str(context.get("prompt_text") or ""))
+        st.write("context_defaults：")
+        st.json(context.get("context_defaults") or {})
 
 
 def _show_preview(st: Any, preview: Mapping[str, Any]) -> None:

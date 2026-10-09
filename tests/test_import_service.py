@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,7 @@ from tokensql.importers import ParserProfile
 from tokensql.llm import QwenResult, QwenSelection, ReviewReason
 from tokensql.services import ExcelImportService, ImportContext
 from tokensql.services.catalog_service import CatalogService
+from tokensql.services.import_service import normalize_prompt
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -543,6 +545,122 @@ def test_import_qwen_low_confidence_creates_review_without_guessing(
     assert review.proposed_resolution["review_reason"] == "low_confidence"
     assert summary.review_rows == 1
     assert session.scalar(select(func.count(PriceSnapshot.id))) == 0
+
+
+def test_normalize_prompt_canonicalizes_whitespace_and_unicode() -> None:
+    assert normalize_prompt("  报价　供应商 \tX\n\n  币种 CNY  \n") == (
+        "报价 供应商 X\n币种 CNY"
+    )
+    assert normalize_prompt("") == ""
+
+
+def test_import_context_requires_mapping_context_defaults() -> None:
+    with pytest.raises(ValueError, match="context_defaults"):
+        ImportContext(
+            data_source_id=1,
+            parser_version="parser-v1",
+            context_defaults=["not-a-mapping"],
+        )
+
+
+def test_prompt_text_participates_in_idempotency_and_is_persisted(
+    session: Session,
+    source_and_provider: tuple[int, int],
+    tmp_path: Path,
+) -> None:
+    service = ExcelImportService()
+    path = tmp_path / "prompt.xlsx"
+    _write_one_quote(path, "demo-model")
+    source_id, provider_id = source_and_provider
+
+    def context(prompt: str) -> ImportContext:
+        return ImportContext(
+            data_source_id=source_id,
+            provider_id=provider_id,
+            parser_version="parser-v1",
+            profile=ParserProfile(),
+            prompt_text=prompt,
+            context_defaults={"currency": "CNY", "unit_basis": "1M tokens"},
+        )
+
+    first = service.import_file(session, path, context("厂商为 Example AI"))
+    same = service.import_file(session, path, context("厂商为 Example AI"))
+    assert same.batch_id == first.batch_id
+    assert same.is_duplicate
+
+    other = service.import_file(session, path, context("厂商为 Other AI"))
+    assert other.batch_id != first.batch_id
+    assert session.scalar(select(func.count(ImportBatch.id))) == 2
+
+    batch = session.get(ImportBatch, first.batch_id)
+    assert batch.import_context["prompt_text"] == "厂商为 Example AI"
+    assert batch.import_context["prompt_sha256"] == hashlib.sha256(
+        normalize_prompt("厂商为 Example AI").encode("utf-8")
+    ).hexdigest()
+    assert batch.import_context["context_defaults"] == {
+        "currency": "CNY",
+        "unit_basis": "1M tokens",
+    }
+    assert batch.import_context["interpretation_version"] == "deterministic-v1"
+    assert batch.import_context["context_scope"] == "batch"
+    assert batch.import_context["context_version"] == 1
+
+
+def test_whitespace_equivalent_prompts_share_prompt_sha_but_not_batch(
+    session: Session,
+    source_and_provider: tuple[int, int],
+    tmp_path: Path,
+) -> None:
+    service = ExcelImportService()
+    path = tmp_path / "prompt-ws.xlsx"
+    _write_one_quote(path, "demo-model")
+    source_id, provider_id = source_and_provider
+
+    def context(prompt: str) -> ImportContext:
+        return ImportContext(
+            data_source_id=source_id,
+            provider_id=provider_id,
+            parser_version="parser-v1",
+            profile=ParserProfile(),
+            prompt_text=prompt,
+        )
+
+    first = service.import_file(session, path, context("厂商  X\n\n币种\tCNY "))
+    second = service.import_file(session, path, context(" 厂商 X\n 币种 CNY"))
+    assert second.batch_id != first.batch_id
+    first_context = session.get(ImportBatch, first.batch_id).import_context
+    second_context = session.get(ImportBatch, second.batch_id).import_context
+    assert first_context["prompt_sha256"] == second_context["prompt_sha256"]
+    assert first_context["prompt_text"] != second_context["prompt_text"]
+
+
+def test_prompt_allows_missing_provider_id_in_deterministic_path(
+    session: Session,
+    source_and_provider: tuple[int, int],
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "no-provider.xlsx"
+    _write_one_quote(path, "demo-model")
+    source_id, _ = source_and_provider
+    context = ImportContext(
+        data_source_id=source_id,
+        provider_id=None,
+        parser_version="parser-v1",
+        profile=ParserProfile(),
+        prompt_text="报价供应商为 Fixture provider；缺省币种 CNY。",
+    )
+
+    summary = ExcelImportService().import_file(session, path, context)
+
+    assert summary.total_rows == 1
+    assert summary.staged_quote_count == 1
+    batch = session.get(ImportBatch, summary.batch_id)
+    assert batch.provider_id is None
+    assert batch.status == "partial"
+    assert batch.import_context["prompt_text"] == (
+        "报价供应商为 Fixture provider；缺省币种 CNY。"
+    )
+    assert _reasons(session, summary.batch_id)["provider_missing"] == 1
 
 
 def test_disabled_qwen_never_constructs_client_and_ambiguous_name_is_reviewed(

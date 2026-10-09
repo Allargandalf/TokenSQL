@@ -1,14 +1,21 @@
 # 管理流程与验收边界
 
-## 当前计划：2026-10-07 新导入流程（待实现）
+## 当前流程：Qwen 语义导入（已实现）
 
-新版规范见 [plan.md](../plan.md)，实施交接见 [agent_handoff.md](agent_handoff.md)。Excel 上传旁提供 Prompt/Context 文本框，输入默认厂商/币种/单位及业务说明；上下文需真实进入 Qwen 请求。
+新版规范见 [plan.md](../plan.md)，实施交接见 [agent_handoff.md](agent_handoff.md)。以下按已实现代码描述。
 
-Excel + Context → Python 结构解析 → Qwen 整表理解 → 逐行语义抽取 → 校验/标准化 → 高置信度且规则通过自动发布；仅低置信度或规则异常进入 review。保留 staging/原件/上下文/字段依据，不强制每行人工 confirm 与 approve。
+1. 上传与 Prompt。UI 导入页在文件上传旁提供自由文本 Prompt 文本框和 4 个结构化默认输入（默认模型厂商 `manufacturer`、报价供应商 `provider_name`、缺省币种 `currency`、计价单位 `unit_basis`），自动合并进导入请求；API `POST /imports` 请求 JSON 直接接受 `prompt_text`/`context_defaults`；CLI 用 `--prompt`/`--prompt-file`。`POST /imports/profile` 预览解析不写库，UI 要求先预览再"确认导入"。
+2. 导入执行顺序：确定性结构解析 → `GET /v1/models` 预检 → Qwen 整表理解（先于逐行，产出列角色、厂商/供应商区分、币种/单位基准等 sheet 级默认）→ 分批逐行语义抽取（默认 10 行/批）。全部模型调用在数据库写事务之外。
+3. 校验与标准化。Pydantic strict schema 加规则校验：币种白名单、单位归一化（含百万/千 token 到单 token 的换算）、计费 metric 解析、evidence 必须是该行单元格坐标或 `user_context`、置信度门槛（默认 0.85）同时作用于整行与 `model_name`/`components` 字段、外币必须有 verified FX 汇率、冲突与缺字段进 review。默认值只填缺，不覆盖表内明示值；与默认值冲突进 review。
+4. 自动发布。高置信度且全部规则通过的行：服务层在同一事务内自动 get_or_create 目录（manufacturer/provider/model/version/alias（off、unverified）/offering/plan），自动发布 PriceSnapshot（`verified`，actor `qwen-auto:<model>`，审计与 staged payload 记 `validation_method=auto_rules`、模型名、request id、置信度、prompt 哈希），并自动标准化（CNY 直接；外币用 verified FX 汇率）。仅异常行创建 review 项；正常行不要求逐行人工 confirm/approve。
+5. re-extract。`POST /staged-quotes/{id}/re-extract`（body 需 `actor`）对单条待审核行用批次已存的整表理解重跑抽取：通过则走同一自动发布路径，否则更新审核项；已批准行返回 409，Qwen 关闭返回 409，行不存在 404，请求体非法 422，批次缺少整表理解 503。
+6. 上下文回读与幂等。`GET /imports/{batch_id}/context` 回读 `prompt_text`、`prompt_sha256`、`context_defaults`、`semantic.table_understanding` 等；`ImportBatch.import_context` 记 `context_scope`/`context_version`。幂等键纳入 `prompt_sha256`、`context_defaults` 与 `interpretation_version`：相同文件+相同上下文重放不重复调模型；修改 Prompt 会产生新批次。
 
-以下流程描述当前旧基础版的实际代码与历史验收，用于理解现有接口；不是新流程的产品要求。新能力尚未实施，不应按本文旧流程限制 Qwen 权限或强制所有行人工审核。
+模型不可用时：预检或整表理解失败会使批次记 `failed` 并返回 503（无半写数据）；单批行抽取失败只把该行送 review。运维细节见 [deployment.md](deployment.md)。
 
-## 旧基础版实际流程（截至 2026-09-24）
+## 旧基础版实际流程（截至 2026-09-24，历史）
+
+以下描述旧基础版的实际代码与历史验收，用于理解仍保留的确定性路径与人工审核接口；无 Prompt 的导入仍按本节行为。新链路不再要求普通导入手工 JSON profile 或逐行双重批准。
 
 所有命令在远端项目目录执行。先按 README 创建独立数据库、运行迁移并审核 bootstrap 目录；示例目录是测试模板，不能作为真实供应商身份或报价证据。
 
@@ -32,4 +39,4 @@ Streamlit 的人工确认表单接受上述严格 JSON；候选详情用于逐�
 
 自动化测试使用真实 XLSX 原件、隔离测试目录和模拟人工决定；测试目录中的供应商/模型与确认操作不是实际业务批准。官方抓取使用合成响应和 mock transport，不证明某一厂商当前页面可用。
 
-SQLite 迁移、持久化、事务回滚、API 全流程及 HTTP 客户端已测试。PostgreSQL 实例、真实厂商采集、Qwen-32B 实机结构化能力、浏览器交互和容器镜像构建尚未验收。Qwen 当前仅参与模型匹配；价格语义抽取尚未实现，歧义价格由人工确认。最终命令结果与剩余项见 progress.md。
+SQLite 迁移、持久化、事务回滚、API 全流程及 HTTP 客户端已测试。PostgreSQL 实例、真实厂商采集、Qwen-32B 实机结构化能力、浏览器交互和容器镜像构建尚未验收。就历史基线而言，Qwen 当时仅参与模型匹配，价格语义抽取尚未实现；该限制已被上文 Qwen 语义导入链路取代，其回归测试使用 mock 网关，真实模型闭环与剩余项见 progress.md。

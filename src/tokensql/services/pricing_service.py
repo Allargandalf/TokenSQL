@@ -36,7 +36,8 @@ KNOWN_UNITS = frozenset({
 })
 KNOWN_CONDITION_KEYS = frozenset({
     "cache", "batch", "region", "service_tier", "tier", "time_window",
-    "input_length", "output_length", "context_length", "priority",
+    "input_length", "output_length", "context_length", "priority", "variant",
+    "resolution",
 })
 DEFAULT_NORMALIZATION_ALGORITHM = "tokensql-normalization-v1"
 

@@ -142,6 +142,13 @@ class TokenSQLClient:
         )
         return _expect_object(payload, "/imports")
 
+    def get_import_context(self, batch_id: int | str) -> dict[str, Any]:
+        identifier = _resource_id(batch_id)
+        return _expect_object(
+            self._json("GET", f"/imports/{identifier}/context"),
+            "import context",
+        )
+
     def list_staged_quotes(
         self,
         *,

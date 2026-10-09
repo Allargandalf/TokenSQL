@@ -4,8 +4,10 @@ from functools import lru_cache
 import ipaddress
 from urllib.parse import urlsplit
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_QWEN_REASONING_EFFORTS = {"none", "low", "medium", "high"}
 
 
 def _validate_qwen_base_url(value: str, *, allow_remote: bool) -> str:
@@ -43,12 +45,31 @@ class Settings(BaseSettings):
     sqlite_busy_timeout_ms: int = Field(default=5_000, ge=0)
 
     qwen_enabled: bool = False
-    qwen_base_url: str = "http://127.0.0.1:18080/v1"
+    qwen_base_url: str = "http://127.0.0.1:8080/v1"
     qwen_model: str | None = None
     qwen_api_key: str | None = None
     qwen_timeout_seconds: float = Field(default=30.0, gt=0.0, le=300.0)
     qwen_min_confidence: float = Field(default=0.75, ge=0.0, le=1.0)
     qwen_allow_remote: bool = False
+    qwen_max_in_flight: int = Field(default=1, ge=1, le=8)
+    qwen_max_tokens: int = Field(default=8192, ge=256, le=32768)
+    qwen_reasoning_effort: str = "low"
+    qwen_auto_publish_min_confidence: float = Field(default=0.85, ge=0.0, le=1.0)
+    qwen_extraction_version: str = "qwen-extract-v3"
+    qwen_table_prompt_version: str = "qwen-table-v2"
+
+    @field_validator("qwen_reasoning_effort", mode="before")
+    @classmethod
+    def _normalize_reasoning_effort(cls, value: object) -> object:
+        if isinstance(value, str):
+            normalized = value.strip().casefold()
+            if normalized not in _QWEN_REASONING_EFFORTS:
+                raise ValueError(
+                    "qwen_reasoning_effort must be one of "
+                    "none, low, medium, high"
+                )
+            return normalized
+        return value
 
     @model_validator(mode="after")
     def validate_qwen(self) -> "Settings":

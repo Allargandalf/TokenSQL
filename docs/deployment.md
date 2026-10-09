@@ -1,6 +1,6 @@
 # TokenSQL 部署说明
 
-> 2026-10-07 接手提示：本文描述旧基础版部署，不是新版智能导入的实现状态。第 6 节的 18080/32B 是现有旧代码占位与历史调查，不是当前模型选择；新计划优先复用 Strata，核查地址 http://127.0.0.1:8080/v1、实际 ID qwen3.8-flash-next-iq3_s。先按 [新版计划](../plan.md) 与 [交接说明](agent_handoff.md) 适配响应/整表抽取，再启用；不要直接复制旧值、部署旧32B或重启共享服务。普通导入也不再以第 4 节的 JSON profile/全人工批准作为产品要求。
+> 2026-10-07 接手提示：Qwen 语义导入链路已实现，第 6 节已按实现更新环境变量与运维说明，规范见 [新版计划](../plan.md) 与 [交接说明](agent_handoff.md)。第 6 节保留的 18080/32B 是历史调查占位，不是当前模型选择；当前默认 base URL 为 http://127.0.0.1:8080/v1（loopback），实测 model ID 为 qwen3.8-flash-next-iq3_s，启用前仍须现场核实共享网关可用，不部署旧 32B、不重启共享服务。普通导入不再以第 4 节的 JSON profile/全人工批准作为产品要求；无 Prompt 时仍走旧确定性路径。
 
 本文描述可执行的部署路径，不代表已经部署。本次交付没有构建镜像、拉取镜像、创建
 容器、启动 API/UI/PostgreSQL，也没有重启 Qwen。
@@ -14,7 +14,8 @@ cp .env.example .env
 逐项替换 `.env` 中的尖括号占位符。至少确认：
 
 - `TOKENSQL_DATABASE_URL` 指向本项目独立的 SQLite 文件或 PostgreSQL 16。
-- `TOKENSQL_QWEN_ENABLED=false` 保持默认，直到独立 Qwen 服务通过验收。
+- `TOKENSQL_QWEN_ENABLED=false` 保持默认，直到共享模型网关通过第 6 节的现场验收；
+  启用时必须同时设置 `TOKENSQL_QWEN_MODEL`。
 - 使用 PostgreSQL profile 时，设置新的强密码；不要复用其他业务凭据。
 - 端口默认只发布到 `127.0.0.1`。需要反向代理时，应在代理层配置 TLS、鉴权和访问
   控制，而不是直接改成公网监听。
@@ -121,10 +122,15 @@ docker compose run --rm api profile-xlsx /imports/<file.xlsx> --json
 
 1. 审核 bootstrap JSON 并运行 `bootstrap-catalog`，从输出的
    `ids.data_sources` 与 `ids.providers` 取得 source/provider ID；不要手工猜测主键。
-2. 为工作簿准备版本化的 JSON parser profile。
-3. 先运行 `profile-xlsx` 检查合并单元格、公式、缺失币种和 review 数量。
-4. 运行 `import-xlsx --source-id ... --provider-id ... --profile ...`；两个 ID 都必须
-   来自已审核 bootstrap 输出，禁止跳过人工审核要求。
+   语义链路会自动 get_or_create 模型/供应商目录，但 `data_source.id` 仍必须来自
+   已审核输出。
+2. 语义导入（推荐）：确认 `TOKENSQL_QWEN_ENABLED=true` 且 model 已配置，随导入提供
+   自由文本 Prompt（CLI `--prompt`/`--prompt-file`，API `prompt_text`/`context_defaults`），
+   无需手工 JSON parser profile；`--provider-id` 可省略。
+3. 旧确定性路径：为工作簿准备版本化的 JSON parser profile，并显式提供
+   `--provider-id`。
+4. 先运行 `profile-xlsx` 检查合并单元格、公式、缺失币种和 review 数量。
+5. 运行 `import-xlsx --source-id ... [--prompt ... | --provider-id ... --profile ...]`。
 
 ## 5. 官方价格单次刷新与外部调度
 
@@ -170,30 +176,56 @@ metric code、单位和条件都必须逐项审核；配置规范见 `docs/offic
 这些外部调度定义属于部署环境，不由应用写入或安装。上线前用录制 fixture、mock HTTP
 客户端和测试数据库验收适配器，不在 CI 或验收测试中访问真实官网。
 
-## 6. Qwen
+## 6. Qwen 语义导入
 
-默认配置为：
+语义导入链路已实现。默认配置（`src/tokensql/config.py`）：
 
 ```dotenv
 TOKENSQL_QWEN_ENABLED=false
-TOKENSQL_QWEN_BASE_URL=http://127.0.0.1:18080/v1
+TOKENSQL_QWEN_BASE_URL=http://127.0.0.1:8080/v1
+TOKENSQL_QWEN_MODEL=<model-id-required-when-enabled>
 TOKENSQL_QWEN_TIMEOUT_SECONDS=30
-TOKENSQL_QWEN_MIN_CONFIDENCE=0.75
 TOKENSQL_QWEN_ALLOW_REMOTE=false
+TOKENSQL_QWEN_MAX_IN_FLIGHT=1
+TOKENSQL_QWEN_MAX_TOKENS=8192
+TOKENSQL_QWEN_REASONING_EFFORT=low
+TOKENSQL_QWEN_AUTO_PUBLISH_MIN_CONFIDENCE=0.85
+TOKENSQL_QWEN_MIN_CONFIDENCE=0.75
+TOKENSQL_QWEN_EXTRACTION_VERSION=qwen-extract-v3
+TOKENSQL_QWEN_TABLE_PROMPT_VERSION=qwen-table-v2
 ```
 
-该 loopback 地址当前不可用，仅保留为安全默认值。现有 1.5B 服务已自行退出，32B
-服务未启动；本次未进行恢复。容器内的 `127.0.0.1` 指向容器本身，因此未来启用
-宿主机或独立推理容器时必须显式配置可达、受限的地址，且不得把 key 写入镜像或
-Compose 源文件。Qwen 默认关闭；API 健康检查只报告其是否 enabled/configured，
-不会发送模型请求。启用时必须设置 model；非 loopback 地址还必须显式设置
-`TOKENSQL_QWEN_ALLOW_REMOTE=true`，否则配置校验会拒绝启动。
+默认 base URL 是 loopback 的共享 OpenAI 兼容网关；启用前必须现场核实该网关可用、
+model ID 已加载，且不得重启、升级或替换共享模型服务。容器内的 `127.0.0.1` 指向
+容器本身，跨主机使用时必须显式配置可达地址并同时设置
+`TOKENSQL_QWEN_ALLOW_REMOTE=true`，否则配置校验拒绝启动；key 只经环境/secret 注入，
+不写入镜像或 Compose 源文件。API 健康检查只报告 enabled/configured，不发送模型请求。
 
-当前 `QwenClient` 只在 Python 提供的模型候选集合中选择索引，没有价格抽取接口。
-内置官方适配器采用确定性 JSON 映射；价格含义不明确时必须人工确认，不能声称已实现
-Qwen 语义价格抽取。启用 Qwen 前至少验收普通对话、严格 JSON Schema、非法响应拒绝、
-超时、并发、显存峰值和进程故障恢复。Function Calling 不是安全边界，数据库写入
-始终由 Python 完成。
+并发与超时：
+
+- `TOKENSQL_QWEN_MAX_IN_FLIGHT`（默认 1，1–8）是进程级、按 base URL 共享的信号量
+  上限：同一进程内多个请求各自建客户端，但共用一个在途预算，取最大配置值，用于
+  保护共享网关不被 TokenSQL 挤占。
+- `TOKENSQL_QWEN_TIMEOUT_SECONDS` 默认 30 秒、上限 300 秒，作用于预检与每次
+  chat completion。
+- `TOKENSQL_QWEN_REASONING_EFFORT` 默认 `low`（可选 `none`/`low`/`medium`/`high`），
+  `TOKENSQL_QWEN_MAX_TOKENS` 默认 8192。
+- `TOKENSQL_QWEN_AUTO_PUBLISH_MIN_CONFIDENCE` 默认 0.85，同时作用于整行置信度与
+  `model_name`/`components` 字段置信度；低于门槛进 review。旧确定性路径的候选匹配
+  门槛仍是 `TOKENSQL_QWEN_MIN_CONFIDENCE`（默认 0.75）。
+- 全部模型调用发生在数据库写事务之外；导入先跑模型阶段，再在单事务内落库。
+
+模型服务不可用时的运维行为：预检（`GET /v1/models`）或整表理解失败会抛出
+`SemanticImportError`，API 返回 503，批次以 `failed` 状态与错误信息留痕，写事务
+回滚、不产生半写数据；单个行批次的超时/坏响应只把该行送 review，批次转
+`partial`。重试语义：相同文件+相同上下文（含 prompt 哈希）重放时，成功/部分完成
+的既有批次直接返回而不重跑模型；`failed` 批次则会被复活并重跑导入（幂等键保持
+唯一，错误信息更新）。`POST /staged-quotes/{id}/re-extract`
+可对单条待审核行在网关恢复后重跑抽取。
+
+历史说明：2026-09-23 调查中的 18080 端点与 32B 权重是旧代码占位与历史事实，已不是
+当前模型选择；旧 `QwenClient` 的候选索引匹配仍保留给无 Prompt 的确定性路径。
+Function Calling 不是安全边界，数据库写入始终由 Python 服务层完成。
 
 ## 7. 回滚与运维
 

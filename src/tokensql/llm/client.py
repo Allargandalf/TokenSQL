@@ -8,9 +8,18 @@ from typing import Any, Sequence
 from urllib.parse import urlsplit
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from .schemas import ModelCandidate, QwenResult, QwenSelection, ReviewReason
+
+_REASONING_EFFORTS = {"none", "low", "medium", "high"}
 
 
 class QwenClientConfig(BaseModel):
@@ -18,13 +27,28 @@ class QwenClientConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    base_url: str = "http://127.0.0.1:18080/v1"
+    base_url: str = "http://127.0.0.1:8080/v1"
     api_key: str | None = None
-    model: str = "Qwen/Qwen2.5-32B-Instruct"
+    model: str = "qwen3.8-flash-next-iq3_s"
     timeout_seconds: float = Field(default=30.0, gt=0.0, le=300.0)
     use_json_schema: bool = True
     min_confidence: float = Field(default=0.75, ge=0.0, le=1.0)
     allow_remote: bool = False
+    max_tokens: int = Field(default=8192, ge=256, le=32768)
+    reasoning_effort: str = "low"
+    max_in_flight: int = Field(default=1, ge=1, le=8)
+
+    @field_validator("reasoning_effort", mode="before")
+    @classmethod
+    def _normalize_reasoning_effort(cls, value: object) -> object:
+        if isinstance(value, str):
+            normalized = value.strip().casefold()
+            if normalized not in _REASONING_EFFORTS:
+                raise ValueError(
+                    "reasoning_effort must be one of none, low, medium, high"
+                )
+            return normalized
+        return value
 
     @model_validator(mode="after")
     def validate_endpoint(self) -> "QwenClientConfig":
@@ -56,11 +80,17 @@ class QwenClientConfig(BaseModel):
             timeout_seconds=settings.qwen_timeout_seconds,
             min_confidence=settings.qwen_min_confidence,
             allow_remote=settings.qwen_allow_remote,
+            max_tokens=settings.qwen_max_tokens,
+            reasoning_effort=settings.qwen_reasoning_effort,
+            max_in_flight=settings.qwen_max_in_flight,
         )
 
 
 class _Message(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # Transport envelope: unknown gateway extension fields are ignored so a
+    # shared gateway can evolve its response shape; business content JSON is
+    # still validated strictly by the caller-facing schemas.
+    model_config = ConfigDict(extra="ignore")
     role: str | None = None
     content: str
     refusal: str | None = None
@@ -68,7 +98,7 @@ class _Message(BaseModel):
 
 
 class _Choice(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
     index: int | None = None
     message: _Message
     finish_reason: str | None = None
@@ -77,14 +107,15 @@ class _Choice(BaseModel):
 
 
 class _Usage(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     total_tokens: int | None = None
+    prompt_tokens_details: dict[str, Any] | None = None
 
 
 class _ChatCompletion(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
     id: str | None = None
     object: str | None = None
     created: int | None = None
@@ -93,6 +124,7 @@ class _ChatCompletion(BaseModel):
     usage: _Usage | None = None
     system_fingerprint: str | None = None
     service_tier: str | None = None
+    timings: dict[str, Any] | None = None
 
 
 _SYSTEM_PROMPT = """You resolve a model name only against the supplied numbered candidates.

@@ -619,6 +619,67 @@ def test_import_is_idempotent(api) -> None:
     assert second.json()["reused_existing"] is True
 
 
+def test_import_prompt_roundtrip_and_context_endpoint(api) -> None:
+    client, ids = api
+    prompt = "该表模型厂商为 Acme；缺省币种 CNY；价格按每百万 Token。"
+    request = json.dumps(
+        {
+            "data_source_id": ids["source"],
+            "provider_id": ids["provider"],
+            "parser_version": "api-prompt-v1",
+            "profile": {"discount_scale": "10"},
+            "prompt_text": prompt,
+            "context_defaults": {"currency": "CNY", "unit_basis": "每百万 Token"},
+        }
+    )
+    imported = client.post(
+        "/imports",
+        files={"file": ("quote.xlsx", _xlsx_bytes())},
+        data={"request": request},
+    )
+    assert imported.status_code == 200, imported.text
+    batch_id = imported.json()["batch_id"]
+
+    response = client.get(f"/imports/{batch_id}/context")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["batch_id"] == batch_id
+    context = payload["import_context"]
+    assert context["prompt_text"] == prompt
+    assert context["context_defaults"] == {
+        "currency": "CNY",
+        "unit_basis": "每百万 Token",
+    }
+    assert context["prompt_sha256"]
+    assert context["interpretation_version"] == "deterministic-v1"
+    assert context["context_scope"] == "batch"
+
+    missing = client.get("/imports/999999/context")
+    assert missing.status_code == 404
+
+
+def test_import_prompt_without_provider_id_is_accepted(api) -> None:
+    client, ids = api
+    request = json.dumps(
+        {
+            "data_source_id": ids["source"],
+            "parser_version": "api-prompt-noprovider-v1",
+            "profile": {"discount_scale": "10"},
+            "prompt_text": "报价供应商为 Vendor；缺省币种 CNY。",
+        }
+    )
+    imported = client.post(
+        "/imports",
+        files={"file": ("quote.xlsx", _xlsx_bytes())},
+        data={"request": request},
+    )
+    assert imported.status_code == 200, imported.text
+    batch_id = imported.json()["batch_id"]
+    context = client.get(f"/imports/{batch_id}/context").json()["import_context"]
+    assert context["provider_id"] is None
+    assert context["prompt_text"] == "报价供应商为 Vendor；缺省币种 CNY。"
+
+
 def test_review_approve_reject_status_and_conflict(api) -> None:
     client, ids = api
     assert len(client.get("/reviews").json()) == 2
