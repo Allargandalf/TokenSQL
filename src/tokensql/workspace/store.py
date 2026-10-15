@@ -11,7 +11,6 @@ from pathlib import Path
 import sqlite3
 from threading import RLock
 from typing import Any
-from urllib.parse import quote as urlquote
 
 from tokensql.workspace.schemas import QuoteCreate, QuoteResponse
 
@@ -486,85 +485,6 @@ class WorkspaceStore:
             "added": int(row[0]), "updated": int(row[1]),
             "deleted": int(row[2]), "total": int(row[3]),
         }
-
-    def import_legacy_sqlite(
-        self,
-        source_path: str | Path,
-        *,
-        actor: str = "manual/cli",
-        idempotency_key: str | None = None,
-    ) -> tuple[list[QuoteResponse], bool]:
-        """Copy verified legacy components through a read-only SQLite handle."""
-        source = Path(source_path).expanduser().resolve()
-        if not source.is_file():
-            raise ValueError(f"legacy SQLite database does not exist: {source}")
-        uri = f"file:{urlquote(str(source))}?mode=ro"
-        legacy = sqlite3.connect(uri, uri=True)
-        legacy.row_factory = sqlite3.Row
-        try:
-            legacy.execute("PRAGMA query_only=ON")
-            rows = legacy.execute(
-                """
-                SELECT
-                    sm.canonical_name AS model_name,
-                    mv.version_name AS model_version,
-                    m.name AS manufacturer,
-                    p.name AS provider,
-                    p.provider_type AS provider_type,
-                    pc.raw_amount AS amount,
-                    pc.raw_currency_code AS currency,
-                    pc.raw_unit_name AS unit,
-                    pc.raw_unit_quantity AS unit_quantity,
-                    bm.code AS metric,
-                    bm.dimension AS dimension,
-                    bm.direction AS direction,
-                    pc.component_type AS component_type,
-                    pc.discount_rate AS discount_rate,
-                    pc.conditions AS conditions,
-                    ps.effective_from AS effective_date,
-                    ds.name AS source,
-                    sa.uri AS source_ref,
-                    pp.name AS note
-                FROM price_component pc
-                JOIN price_snapshot ps ON ps.id = pc.price_snapshot_id
-                JOIN pricing_plan pp ON pp.id = ps.pricing_plan_id
-                JOIN offering o ON o.id = pp.offering_id
-                JOIN standard_model sm ON sm.id = o.standard_model_id
-                LEFT JOIN model_version mv ON mv.id = o.model_version_id
-                JOIN manufacturer m ON m.id = sm.manufacturer_id
-                JOIN provider p ON p.id = o.provider_id
-                JOIN billing_metric bm ON bm.id = pc.billing_metric_id
-                JOIN data_source ds ON ds.id = ps.data_source_id
-                LEFT JOIN source_artifact sa ON sa.id = ps.source_artifact_id
-                WHERE ps.verification_status = 'verified'
-                ORDER BY ps.id, pc.id
-                """
-            ).fetchall()
-        finally:
-            legacy.close()
-
-        items: list[QuoteCreate] = []
-        for row in rows:
-            raw = dict(row)
-            conditions = raw.get("conditions")
-            if isinstance(conditions, str):
-                conditions = json.loads(conditions)
-            raw["conditions"] = conditions or {}
-            effective = raw.get("effective_date")
-            if isinstance(effective, str):
-                raw["effective_date"] = effective[:10]
-            if raw.get("component_type") == "discount":
-                raw["currency"] = None
-                raw["unit"] = None
-                raw["unit_quantity"] = "1"
-            items.append(QuoteCreate.model_validate(raw))
-        if not items:
-            return [], False
-        payload = [item.model_dump(mode="json") for item in items]
-        digest = hashlib.sha256(_json(payload).encode("utf-8")).hexdigest()
-        key = idempotency_key or ("legacy-sqlite:" + digest)
-        return self.create_many(items, actor=actor, idempotency_key=key)
-
 
     def apply_changes(
         self,

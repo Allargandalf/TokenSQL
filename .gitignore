@@ -45,8 +45,9 @@ exports/
 *.pfx
 secrets/
 
-# Original quotation workbooks stay on the remote server
-/test/*.xlsx
+# User-provided samples stay local, regardless of file format.
+/test/*
+!/test/.gitkeep
 /.private-docs/
 
 # Local acceptance databases, logs, and run scripts

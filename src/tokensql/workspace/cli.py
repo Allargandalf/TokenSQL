@@ -174,12 +174,6 @@ def _parser() -> argparse.ArgumentParser:
     export.add_argument("--metric")
     export.add_argument("--dimension")
 
-    legacy = commands.add_parser(
-        "import-legacy", help="copy verified quotes from a legacy SQLite database"
-    )
-    legacy.add_argument("source", type=Path)
-    legacy.add_argument("--actor", default="manual/cli")
-    legacy.add_argument("--idempotency-key")
     return parser
 
 
@@ -218,17 +212,6 @@ def main(argv: list[str] | None = None) -> int:
             )
             _write_export(args.output, items)
             _print({"exported": len(items), "path": str(args.output)})
-            return 0
-        if args.command == "import-legacy":
-            items, reused = store.import_legacy_sqlite(
-                args.source, actor=args.actor,
-                idempotency_key=args.idempotency_key,
-            )
-            _print({
-                "changes": store.change_summary(args.actor),
-                "items": [_response_dict(item) for item in items],
-                "reused": reused,
-            })
             return 0
         raise AssertionError(f"unsupported command: {args.command}")
     except Exception as error:

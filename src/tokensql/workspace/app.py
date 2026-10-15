@@ -4,15 +4,17 @@ Run with ``python -m uvicorn tokensql.workspace.app:app --host 127.0.0.1 --port 
 """
 from contextlib import asynccontextmanager
 from pathlib import Path
+import sys
 from typing import Any
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from tokensql import __version__
 from .agent import AgentConfig, OpenCodeAgentManager
 from .agent_routes import create_agent_router
-from .config import PROJECT_ROOT, WorkspaceSettings
+from .config import WorkspaceSettings
 from .data_routes import create_data_router
 from .store import WorkspaceStore
 
@@ -33,7 +35,7 @@ def create_app(
         config=AgentConfig(
             workspace_dir=settings.workspace_dir.resolve(),
             database_path=settings.database_path,
-            python_bin=PROJECT_ROOT / ".venv" / "bin" / "python",
+            python_bin=Path(sys.executable),
             server_url=settings.opencode_url,
             provider_id=settings.opencode_provider,
             model_id=settings.opencode_model,
@@ -53,7 +55,7 @@ def create_app(
             await manager.shutdown()
             store.close()
 
-    api = FastAPI(title="TokenSQL Workspace", version="0.2.0", lifespan=lifespan)
+    api = FastAPI(title="TokenSQL Workspace", version=__version__, lifespan=lifespan)
     api.state.workspace_store = store
     api.state.agent_manager = manager
     api.include_router(create_data_router(store))
