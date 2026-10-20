@@ -15,6 +15,15 @@ class WorkspaceSettings(BaseSettings):
     )
 
     workspace_dir: Path = PROJECT_ROOT / "var" / "workspace"
+    agent_dir: Path = PROJECT_ROOT.parent / "TokenSQL-opencode"
+    input_dir: Path = PROJECT_ROOT / "input"
+    progress_dir: Path = PROJECT_ROOT / "progress"
+    data_dir: Path = PROJECT_ROOT / "data"
+    opencode_bin: Path | None = None
+    opencode_config: Path | None = None
+    test_mode: bool = False
+    fx_auto_refresh: bool = False
+    fx_refresh_seconds: float = Field(default=3600, ge=60, le=86400)
     opencode_url: str = "http://127.0.0.1:8766"
     opencode_provider: str = "qwen38-flash-next-local"
     opencode_model: str = "qwen3.8-flash-next-iq3_s"

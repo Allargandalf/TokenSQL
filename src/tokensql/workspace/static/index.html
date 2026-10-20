@@ -32,18 +32,28 @@
           <div class="panel-toolbar">
             <label class="search-control"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><input id="searchInput" type="search" placeholder="搜索模型、厂商或来源…" autocomplete="off"></label>
             <div class="filters" id="filters">
-              <select id="manufacturerFilter" aria-label="按厂商筛选"><option value="">全部厂商</option></select>
+              <select id="manufacturerFilter" aria-label="按模型商筛选"><option value="">全部模型商</option></select>
               <select id="providerFilter" aria-label="按供应商筛选"><option value="">全部供应商</option></select>
-              <select id="currencyFilter" aria-label="按币种筛选"><option value="">全部币种</option></select>
+              <select id="tagFilter" aria-label="按标签筛选"><option value="">全部标签</option></select>
               <select id="metricFilter" aria-label="按计费项筛选"><option value="">全部计费项</option></select>
-              <select id="dimensionFilter" aria-label="按维度筛选"><option value="">全部维度</option></select>
+              <select id="currencyFilter" aria-label="按原币筛选"><option value="">全部原币</option></select>
+
             </div>
             <button class="icon-button" id="clearFiltersButton" type="button" title="清除筛选" aria-label="清除筛选"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17"/></svg></button>
           </div>
 
+          <div class="price-toolbar">
+            <button id="pricingConversionButton" class="conversion-button" type="button" aria-pressed="false">折扣 / 折后价：原始值</button>
+            <button id="currencyConversionButton" class="conversion-button" type="button" aria-haspopup="dialog">币种：原币</button>
+            <button id="unitConversionButton" class="conversion-button" type="button" aria-haspopup="dialog">单位：原单位</button>
+            <button id="resetConversionButton" class="text-button" type="button" hidden>恢复全部原价</button>
+            <span id="conversionSummary">两个显示换算可独立使用 · 缺合法倍率不换算</span>
+            <button id="catalogButton" class="text-button" type="button">模型目录</button><button id="contextButton" class="text-button" type="button">汇率与模型参数</button>
+          </div>
           <div class="selection-bar" id="selectionBar" hidden>
             <span><strong id="selectedCount">0</strong> 条已选择</span>
             <button class="text-button" id="exportSelectedButton" type="button">导出所选</button>
+            <button class="text-button danger" id="deleteSelectedButton" type="button">删除所选</button>
             <button class="text-button" id="clearSelectionButton" type="button">取消选择</button>
           </div>
 
@@ -51,7 +61,7 @@
             <table class="data-table">
               <thead><tr>
                 <th class="check-cell"><input id="selectAll" type="checkbox" aria-label="选择当前页全部报价"></th>
-                <th>模型</th><th>厂商</th><th>供应商</th><th>计费项</th><th class="number-cell">单价 / 折扣</th><th>币种 / 单位</th><th>生效日期</th><th>来源</th><th class="action-cell"></th>
+                <th>模型 / 唯一 ID</th><th>模型商</th><th>供应商 / 标签 / 渠道 ID</th><th>计费项</th><th class="number-cell">官网价 / 单位</th><th class="number-cell">供应商价 / 单位</th><th class="number-cell">付款倍率 / 折扣</th><th>来源</th><th class="action-cell">操作</th>
               </tr></thead>
               <tbody id="quoteRows"></tbody>
             </table>
@@ -77,14 +87,24 @@
             <div class="agent-avatar">OC</div>
             <div>
               <div class="agent-title-row"><h2 id="agentHeading">OpenCode</h2><span class="status-pill" id="agentStatus"><i></i>连接中</span></div>
-              <p>直接维护报价数据库</p>
+              <p>分析文件 → 人工审核 → 确认入库</p>
             </div>
           </header>
+          <div class="session-toolbar"><select id="sessionSelect" aria-label="历史会话"><option value="">新会话</option></select><button id="newSessionButton" type="button" class="text-button">新会话</button><button id="memoryButton" type="button" class="text-button">纠错记忆</button></div>
+          <div class="job-strip" id="jobStrip" hidden><span id="jobStatus"></span><button id="reviewOpenButton" class="text-button" type="button" hidden>打开审核</button><button id="abortButton" class="text-button danger" type="button">中止</button></div>
+          <section id="waitingPanel" class="waiting-panel" aria-labelledby="waitingHeading" hidden>
+            <h3 id="waitingHeading">等待补充</h3>
+            <p id="waitingSummary"></p>
+            <ol id="waitingQuestions"></ol>
+            <p id="waitingFiles" class="muted-cell"></p>
+            <button id="continueUnknownButton" class="text-button" type="button">非关键未知项留空并继续</button>
+          </section>
+          <details class="input-files"><summary>输入文件 <span id="inputFileCount"></span></summary><div id="inputFiles"></div></details>
           <div class="conversation" id="conversation" aria-live="polite">
             <article class="message assistant">
               <div class="message-label">OPENCODE</div>
               <div class="message-body">
-                <p>把 Excel 或其他资料拖到这里，再说明表格含义和你希望如何写入。我会分析文件并直接更新报价库。</p>
+                <p>把 Excel 拖入、粘贴或选择后，说明表格含义。解析结果会打开独立审核面板；确认后才会更新正式报价库。</p>
                 <div class="example-prompts">
                   <button type="button" data-prompt="导入附件中的报价。厂商、供应商、币种和计价单位以文件及我提供的上下文为准；未明确的内容先向我说明，不要猜测。">导入供应商报价</button>
                   <button type="button" data-prompt="检查这个文件中的模型报价，与数据库现有记录比较，更新发生变化的价格。">比较并更新价格</button>
@@ -94,6 +114,7 @@
           </div>
           <div class="composer" id="composer">
             <div class="drop-hint" id="dropHint">松开即可添加文件</div>
+            <p id="composerHint" class="composer-hint" hidden></p>
             <div class="file-chips" id="fileChips"></div>
             <textarea id="promptInput" rows="3" placeholder="输入指令，或拖入 / 粘贴文件…" aria-label="给 OpenCode 的指令"></textarea>
             <div class="composer-footer">
@@ -110,32 +131,94 @@
     <form method="dialog" id="quoteForm">
       <header><div><p class="eyebrow">PRICE RECORD</p><h2 id="editorTitle">编辑报价</h2></div><button class="icon-button" type="button" data-close-editor aria-label="关闭">×</button></header>
       <div class="form-grid">
-        <label class="wide">模型名称<input name="model_name" required></label>
-        <label>模型版本<input name="model_version"></label>
-        <label>厂商<input name="manufacturer"></label>
-        <label>供应商<input name="provider" required></label>
-        <label>供应商类型<select name="provider_type"><option value="unknown">未指定</option><option value="official">官方</option><option value="reseller">经销商</option><option value="aggregator">聚合商</option><option value="internal">内部</option></select></label>
-        <label>价格类型<select name="component_type"><option value="monetary">金额</option><option value="discount">折扣</option></select></label>
-        <label data-money-field>价格<input name="amount" inputmode="decimal"></label>
-        <label data-discount-field hidden>折扣率（0.31 = 3.1 折）<input name="discount_rate" inputmode="decimal"></label>
-        <label>币种<input name="currency" maxlength="3" required></label>
-        <label>单位<input name="unit" required></label>
-        <label>单位数量<input name="unit_quantity" inputmode="decimal" required></label>
-        <label>计费项<input name="metric" required></label>
-        <label>计费维度<input name="dimension" placeholder="token / time / image"></label>
-        <label>方向<select name="direction"><option value="input">输入</option><option value="output">输出</option><option value="cached_input">缓存输入</option><option value="other">其他</option></select></label>
-        <label>生效日期<input name="effective_date" type="date"></label>
+        <label class="wide">唯一模型 ID<input name="model_id" list="modelIdentifiers" required autocomplete="off" placeholder="输入新模型 ID，或选择已有 ID"><datalist id="modelIdentifiers"></datalist><small id="editorModelInfo"></small></label>
+        <label>计费项<input name="billing_item" list="billingItems" placeholder="input / output / cache"><datalist id="billingItems"><option value="input"><option value="output"><option value="cache"></datalist></label>
+        <label>供应商<input name="supplier" list="supplierNames"><datalist id="supplierNames"></datalist></label>
+        <label>标签（逗号分隔）<input name="tags"></label>
+        <label>原供应商渠道 ID<input name="supplier_model_id"></label>
+        <label>币种<select name="currency" aria-label="原始币种"><option value="CNY">人民币 CNY（默认）</option><option value="USD">美元 USD</option><option value="HKD">港币 HKD</option><option value="">未提供 / 不明确</option></select></label>
+        <label>计价单位<select name="pricing_unit_id" aria-label="计价单位"></select><small>币种默认人民币；计价尺度不默认，缺失时可留空。</small></label>
+        <label data-money-field>原币供应商金额<input name="amount" inputmode="decimal"></label>
+        <label data-discount-field>折扣（折，8.0 = 八折，12.0 = 溢价）<input name="discount_rate" inputmode="decimal" placeholder="例如 8.0"><small>折数输入一位小数；付款倍率按 HALF_UP 保留两位小数入库，例如 8.0折 → 0.80。金额精度不变。</small></label>
+        <div class="wide computed-card" id="quotePreview" aria-live="polite">金额与付款倍率都是独立原始输入，可同时提供或留空。计算仅用于前端预览，不反填保存。</div>
         <label>来源<input name="source"></label>
-        <label>来源引用<input name="source_ref" placeholder="工作表、URL 或单元格"></label>
-        <label class="wide">条件（JSON）<textarea name="conditions" rows="3">{}</textarea></label>
-        <label class="wide">备注<textarea name="note" rows="3"></textarea></label>
+        <label>单元格 / 来源依据<input name="source_ref"></label>
+        <label class="wide">条件（JSON）<textarea name="conditions" rows="2">{}</textarea></label>
+        <label class="wide">备注<textarea name="note" rows="2"></textarea></label>
       </div>
       <p class="form-error" id="formError" role="alert"></p>
-      <footer><button class="button secondary" type="button" data-close-editor>取消</button><button class="button primary" id="saveQuoteButton" type="submit">保存</button></footer>
+      <footer><button class="button secondary" type="button" data-close-editor>取消</button><button class="button primary" id="saveQuoteButton" type="button">保存</button></footer>
     </form>
+  </dialog>
+
+  <dialog class="editor-dialog review-dialog" id="reviewDialog">
+    <header><div><p class="eyebrow">REVIEW BEFORE COMMIT</p><h2>审核候选方案</h2><p id="reviewMeta"></p></div><button id="hideReviewButton" class="icon-button" type="button" aria-label="稍后审核">×</button></header>
+    <div class="review-content"><p class="review-notice">以下是待确认草案。可编辑模型、官网计费项与供应商报价；文件明确标注的官网价须保留 explicit_official 和单元格依据。修正经确认后才会形成有作用域的记忆。</p>
+      <div id="reviewSections"></div>
+      <details class="bundle-details"><summary>完整候选 JSON（包含条件、更新与删除）</summary><textarea id="reviewBundle" rows="12" spellcheck="false" aria-label="完整候选方案 JSON"></textarea><button id="applyReviewJsonButton" class="button secondary small" type="button">应用 JSON 编辑</button></details>
+      <div class="computed-card" id="reviewPreview" aria-live="polite"></div><div id="reviewIssues" role="alert"></div>
+    </div>
+    <footer><button id="cancelReviewButton" class="button secondary" type="button">取消并退回输入</button><span class="review-footer-spacer"></span><button id="previewReviewButton" class="button secondary" type="button">保存修正并校验</button><button id="confirmReviewButton" class="button primary" type="button">确认入库</button></footer>
+  </dialog>
+
+  <dialog class="editor-dialog review-dialog" id="catalogDialog">
+    <header><div><p class="eyebrow">MODEL CATALOG</p><h2>模型与官网计费项</h2></div><button id="closeCatalogButton" class="icon-button" type="button" aria-label="关闭模型目录">×</button></header>
+    <div class="review-content"><div id="catalogContents"></div><div class="catalog-actions"><button id="newModelButton" class="button secondary" type="button">新增模型</button><button id="newOfficialButton" class="button secondary" type="button">新增官网计费项</button></div></div>
+  </dialog>
+
+  <dialog class="editor-dialog" id="memoryDialog">
+    <header><div><p class="eyebrow">CONFIRMED CORRECTIONS</p><h2>已确认纠错记忆</h2></div><button id="closeMemoryButton" class="icon-button" type="button" aria-label="关闭记忆">×</button></header>
+    <div class="review-content"><p class="review-notice">仅使用已确认修正；每条规则保留作用域。取消的草案不会写入这里。</p><div id="memoryRules"></div><button id="addMemoryRuleButton" class="text-button" type="button">+ 添加规则</button><p id="memoryError" class="form-error" role="alert"></p></div>
+    <footer><button id="saveMemoryButton" class="button primary" type="button">保存记忆修订</button></footer>
+  </dialog>
+
+  <dialog class="editor-dialog review-dialog" id="contextDialog">
+    <header><div><p class="eyebrow">PRICING CONTEXT</p><h2>汇率与模型计费参数</h2><p id="contextMeta"></p></div><button id="closeContextButton" class="icon-button" type="button" aria-label="关闭参数面板">×</button></header>
+    <div class="review-content"><p class="review-notice">原始币种和单位始终保留。仅在有来源的汇率与模型计费参数齐全时换算；秒、图片等换算为 token 会明确标为估算。缺参数时请补充，不使用默认假设。参数只供前端显示与导出计算，不修改原始报价，也不作为草案确认的价格换算条件。</p>
+      <label class="context-json-label">汇率 fx_rates（currency、cny_per_unit、source、source_url、observed_at，支持 expires_at）<textarea id="contextFx" rows="10" spellcheck="false" aria-label="汇率参数 JSON"></textarea></label>
+      <label class="context-json-label">模型专属 token_equivalences（model_id、billing_item、unit、tokens_per_unit、source、source_ref、observed_at、assumptions）<textarea id="contextFactors" rows="10" spellcheck="false" aria-label="模型计费参数 JSON"></textarea></label>
+      <p id="contextError" class="form-error" role="alert"></p></div>
+    <footer><button id="refreshFxButton" class="button secondary" type="button">从 ECB 刷新汇率</button><span class="review-footer-spacer"></span><button id="saveContextButton" class="button primary" type="button">保存参数并重新计算</button></footer>
+  </dialog>
+
+  <dialog class="editor-dialog conversion-dialog" id="currencyConversionDialog">
+    <header><div><p class="eyebrow">DISPLAY CURRENCY</p><h2>统一显示币种</h2><p>只改变浏览器中的显示与转换导出，不修改原价、计价单位、原始付款倍率、审核上下文或记忆。</p></div><button id="closeCurrencyConversionButton" class="icon-button" type="button" aria-label="关闭币种换算">×</button></header>
+    <div class="review-content">
+      <div class="conversion-options" id="currencyConversionOptions" role="group" aria-label="目标显示币种"></div>
+      <details class="conversion-help"><summary>？ 汇率从哪里来</summary><p id="currencyConversionHelp">仅使用 pricing-context 中带来源的版本化汇率。缺少来源或目标汇率时，该行明确保留原价并标注无法换算。</p></details>
+    </div>
+  </dialog>
+
+  <dialog class="editor-dialog conversion-dialog" id="unitConversionDialog">
+    <header><div><p class="eyebrow">DISPLAY UNIT</p><h2>统一显示单位</h2><p>同 token 量纲直接精确换算；秒 / 张跨量纲必须有模型参数或本次临时倍率。原始付款倍率始终保留；启用折扣计算后，另行显示基于官网价计算的倍率。</p></div><button id="closeUnitConversionButton" class="icon-button" type="button" aria-label="关闭单位换算">×</button></header>
+    <div class="review-content">
+      <div class="conversion-options" id="unitConversionOptions" role="group" aria-label="目标显示单位"></div>
+      <section class="factor-panel" id="factorPanel">
+        <h3>本次显示的临时工程倍率</h3>
+        <p>不保存到 pricing-context、报价或记忆；只参与当前页面显示和转换导出。</p>
+        <label>tokens_per_second<input id="temporaryTokensPerSecond" inputmode="decimal" placeholder="例如：经测试得到的 tokens / 秒"></label>
+        <label>tokens_per_image<input id="temporaryTokensPerImage" inputmode="decimal" placeholder="例如：经测试得到的 tokens / 张"></label>
+        <label>适用模型 ID<input id="temporaryFactorModel" placeholder="必填；只对该模型使用临时倍率"></label>
+        <label>适用计费项<input id="temporaryFactorBillingItem" placeholder="必填，例如 input / output"></label>
+        <label>临时倍率来源 / 说明<input id="temporaryFactorSource" placeholder="必填：测量、文档或人工假设依据"></label>
+        <p class="formula-preview" id="conversionFormula">选择目标单位后显示公式。</p>
+        <button id="applyTemporaryFactorsButton" class="button secondary" type="button">应用临时倍率</button>
+        <p class="factor-scope" id="temporaryFactorScope">尚未应用临时倍率。</p>
+        <p class="form-error" id="temporaryFactorError" role="alert"></p>
+      </section>
+      <details class="conversion-help"><summary>？ 工程估算与适用范围</summary><p>tokens_per_second 只用于视频等按秒项目；tokens_per_image 只用于静态图片。二者不会互相套用，且跨量纲结果始终标记“工程估算”。视频公式没有音频项，不代表音频免费。</p></details>
+      <section class="suggestion-panel">
+        <h3>已核验的视频工程建议</h3>
+        <p>以下仅对应火山方舟 Seedance 指定输出档、24 FPS 与每 1 秒总计费时长，准确 token 以 API usage.completion_tokens 为准；不得跨模型当作真实计费。</p>
+        <div class="suggestion-table-wrap"><table><thead><tr><th>适用模型</th><th>分辨率</th><th>宽 × 高</th><th>FPS</th><th>tokens / s</th><th>依据</th></tr></thead><tbody id="factorSuggestions"></tbody></table></div>
+      </section>
+    </div>
   </dialog>
 
   <div class="toast-region" id="toastRegion" aria-live="polite"></div>
   <script src="/static/app.js" defer></script>
+  <script src="/static/review.js" defer></script>
+  <script src="/static/context.js" defer></script>
+  <script src="/static/conversion.js" defer></script>
 </body>
 </html>

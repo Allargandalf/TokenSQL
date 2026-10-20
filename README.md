@@ -1,53 +1,36 @@
-# TokenSQL
+# TokenSQL v2.2
 
-文件 + Prompt → OpenCode 直接维护报价数据库。
+文件 + Prompt 驱动的模型报价工作台：左侧筛选/编辑/删除/导出，右侧独立 OpenCode 会话，候选经人工确认才正式入库。
 
-`v2.1_cleaned` 只保留报价工作台：左侧筛选、编辑和导出；右侧聊天、上传文件和执行维护。没有旧 parser、逐行语义导入、审核发布或第二套数据库。
+- 唯一模型ID配可选名称/别名，多官网计费项、多供应商渠道与标签；不再维护物理标识。
+- 手工报价可直接输入新模型ID，确认报价时自动创建缺失模型，不必先建目录。
+- 仅模型ID必填；厂商、供应商、计费项、金额、折扣及单位可空。新增缺省币种人民币，明确外币/未知值保留；12项单位已知时校验，Tokens尺度不猜。
+- 金额与原付款比例独立保存；付款倍率统一代码HALF_UP两位并入库（八折0.80、1.5折0.15），前端反算/导出同样两位，辅助折数一位。原金额与FX精度不变；官网折后价仅前端计算导出。
+- 勾选报价后“删除所选”，一次确认永久删除所选报价，保留模型、官网价、文件和删除审计；版本冲突整批不删。
+- 前端独立统一币种/单位、建议或自定义倍率与显示导出；估算有来源和标记，不回写业务价。
+- 缺官网价可一键新建独立OpenCode联网查询会话，读取官网索引，结果审核确认后写官网价。
+- 关键缺项可先等待补充：直接补答后沿用原会话、文件继续，无需重新上传；支持多轮、刷新/重启恢复和取消。
+- 真正解析失败即时显示本轮真实回答与错误，无需切换会话；支持取消退回文件。
+- input/ → progress/ → 人工审核 → data/；取消回输入，确认幂等，事务/文件失败可恢复。
+- 独立OpenCode目录与持久会话、agent.md作用域纠错记忆。真实附件/数据库/会话/日志不进Git。
 
-## 启动
-
-在远端项目目录执行：
-
-```bash
-uv sync --locked
-.venv/bin/tokensql \
-  --opencode-bin /path/to/opencode-runtime/node_modules/.bin/opencode \
-  --provider-config /path/to/local-coding-agent/opencode.json
-```
-
-使用 OpenCode 真实 executable，不使用会覆盖共享环境变量的 wrapper。程序启动网页 `127.0.0.1:8765` 和独立 OpenCode `127.0.0.1:8766`，不更改共享模型服务。
-
-本机执行 SSH 转发并保持终端开启：
+在服务器初始化：
 
 ```bash
-ssh -N -L 8765:127.0.0.1:8765 user@<REMOTE_HOST>
+scripts/setup.sh
+sh service.sh start
+sh service.sh status
+sh service.sh stop
 ```
 
-打开 <http://127.0.0.1:8765>。服务必须先在远端运行；SSH 不会自动启动网页。
+`sh service.sh`（不带参数）提供交互菜单；另支持 `restart` 和 `logs`。启动后在后台运行，退出SSH不会停服。默认识别本服务器现有OpenCode路径；其他服务器可在私有.env设置 TOKENSQL_OPENCODE_BIN / TOKENSQL_OPENCODE_CONFIG。正常开关不会删除数据库、附件或持久会话；正在生成的任务可能中断。
 
-## 使用
+在用户本机建立隧道：
 
-- 把 Excel/CSV 拖到右侧，填写供应商、币种、单位等 Prompt，再发送。
-- OpenCode 用工具读取附件、查询已有报价，经同一事务接口维护数据库；不是固定抽取流水线。
-- 左侧可搜索、筛选、双击编辑，导出当前筛选、选中条目或某模型全部报价，支持 CSV/XLSX。
-- 保留 Decimal 金额、修改版本与审计；有歧义时通过聊天说明，不凭空编造价格。
-
-默认数据目录为 `var/workspace/`，首次启动自动创建空库，不自带报价、上传附件或会话。`test/` 留给用户新样例；样例、数据库和运行文件不提交 Git。
-
-## 验证
-
-```bash
-uv sync --locked --extra test
-.venv/bin/python -B -m pytest -q -p no:cacheprovider
+```powershell
+ssh -N -L 8765:127.0.0.1:8765 uni
 ```
 
-测试仅在临时目录生成数据，不依赖旧 Excel。浏览器与真实模型小测见 [工作台说明](docs/workspace.md)。
+浏览器打开 http://127.0.0.1:8765 。完整启动路径、环境、会话/隔离边界及使用见 [工作台文档](docs/workspace.md)，建议倍率见 [换算依据](docs/unit_conversion_reference.md)，官网入口见 [参考索引](docs/official_price_sources.md)。
 
-## 项目入口
-
-- `src/tokensql/workspace/`：唯一应用、数据 store、CLI、OpenCode 集成和前端。
-- `tests/`：仅工作台回归；`tools/`：可选验收工具。
-- [plan.md](plan.md)：范围与验收；[progress.md](progress.md)：当前进度。
-- `tokensql` 启动网页；`tokensql-quotes --db <path> schema/list/apply/export` 操作报价。
-
-旧代码与历史文档可从 Git 标签 `v2.0` 找回，不属于当前运行路径。
+开发使用 Python>=3.10、uv、pytest；当前开发计划与真实验收状态见 [plan.md](plan.md)、[progress.md](progress.md)。合成/浏览器桩/真实模型/真实业务文件验收分别记录，不以单测数量冒充入库正确。不创建GitHub Release。

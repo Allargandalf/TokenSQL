@@ -1,4 +1,4 @@
-"""Command-line access used by OpenCode and workspace operators."""
+"""Operator CLI for exact pricing, catalog maintenance, previews and exports."""
 from __future__ import annotations
 
 import argparse
@@ -10,112 +10,51 @@ import sys
 from typing import Any
 
 from openpyxl import Workbook
-
-from tokensql.workspace.schemas import QuoteCreate, QuoteResponse
-from tokensql.workspace.store import WorkspaceStore
-
-EXPORT_COLUMNS = (
-    "id", "model_name", "model_version", "manufacturer", "provider",
-    "provider_type", "amount", "currency", "unit", "unit_quantity", "metric",
-    "dimension", "direction", "component_type", "discount_rate", "conditions",
-    "effective_date", "source", "source_ref", "note", "status", "revision",
-    "created_at", "updated_at",
-)
-
-
-def _json_default(value: Any) -> Any:
-    if hasattr(value, "isoformat"):
-        return value.isoformat()
-    return str(value)
+from .data_routes import EXPORT_COLUMNS, _export_values
+from .schemas import PricingBundle, QuoteCreate, QuoteResponse
+from .store import WorkspaceStore
+from .units import pricing_units_payload
 
 
 def _print(value: Any) -> None:
-    print(json.dumps(value, ensure_ascii=False, default=_json_default))
+    print(json.dumps(value, ensure_ascii=False, default=str))
 
 
-def _response_dict(item: QuoteResponse) -> dict[str, Any]:
-    return item.model_dump(mode="json")
-
-
-def _load_apply(path: Path) -> tuple[
-    list[QuoteCreate],
-    list[tuple[int, int, dict[str, Any]]],
-    list[tuple[int, int]],
-]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if isinstance(payload, list):
-        payload = {"create": payload}
-    if not isinstance(payload, dict):
-        raise ValueError("apply input must be a JSON object or quote array")
-    if "items" in payload:
-        if set(payload) - {"items"}:
-            raise ValueError("items shorthand cannot be mixed with apply operations")
-        payload = {"create": payload["items"]}
-    unknown = set(payload) - {"create", "update", "delete"}
-    if unknown:
-        raise ValueError(f"unknown apply sections: {', '.join(sorted(unknown))}")
-
-    creates_raw = payload.get("create", [])
-    updates_raw = payload.get("update", [])
-    deletes_raw = payload.get("delete", [])
-    if not all(isinstance(value, list) for value in (creates_raw, updates_raw, deletes_raw)):
-        raise ValueError("create, update, and delete must be arrays")
-    creates = [QuoteCreate.model_validate(value) for value in creates_raw]
-
-    updates: list[tuple[int, int, dict[str, Any]]] = []
-    for value in updates_raw:
-        if not isinstance(value, dict) or set(value) != {
-            "id", "expected_revision", "changes"
-        }:
-            raise ValueError(
-                "each update requires exactly id, expected_revision, and changes"
-            )
-        if not isinstance(value["changes"], dict):
-            raise ValueError("update changes must be an object")
-        updates.append(
-            (int(value["id"]), int(value["expected_revision"]), value["changes"])
-        )
-
-    deletes: list[tuple[int, int]] = []
-    for value in deletes_raw:
-        if not isinstance(value, dict) or set(value) != {"id", "expected_revision"}:
-            raise ValueError("each delete requires exactly id and expected_revision")
-        deletes.append((int(value["id"]), int(value["expected_revision"])))
-    if not creates and not updates and not deletes:
-        raise ValueError("apply input contains no changes")
-    return creates, updates, deletes
+def _load_bundle(path: Path) -> PricingBundle:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(value, list):
+        value = {"create": value}
+    elif isinstance(value, dict) and set(value) == {"items"}:
+        value = {"create": value["items"]}
+    return PricingBundle.model_validate(value)
 
 
 def _schema() -> dict[str, Any]:
     return {
         "quote": QuoteCreate.model_json_schema(),
-        "apply": {
-            "create": ["QuoteCreate", "..."],
-            "update": [
-                {"id": 1, "expected_revision": 1, "changes": {"amount": "2.50"}}
-            ],
-            "delete": [{"id": 2, "expected_revision": 3}],
-        },
+        "bundle": PricingBundle.model_json_schema(),
+        "apply": {"models": [], "official_prices": [], "create": [], "update": [], "delete": []},
         "notes": [
-            "Decimal values must be JSON strings.",
-            "component_type monetary requires amount, currency, and unit.",
-            "component_type discount requires discount_rate from 0 through 1.",
-            "All create/update/delete operations are committed atomically.",
+            "Only model_id is required; missing models are created automatically. No physical identity field.",
+            "New rows default omitted currency to CNY; explicit null remains unknown and unit IDs determine their own currency.",
+            "Use exact Decimal strings. A complete pricing unit must be one of the 12 pricing_unit_id values.",
+            "currency/unit/unit_quantity are strict compatibility input only and may not conflict with pricing_unit_id.",
+            "Preserve independent source amount and discount_rate, including discount-only records.",
+            "Partial known currency/unit/quantity context is preserved; Tokens never implies 1K or 1M.",
+            "All official-price, discount, currency and unit conversions are frontend display/export only.",
+            "Missing rates or token equivalences are issues, never guessed estimates.",
+            "model_id is the only model identity; billing items never become model IDs.",
+            "Delete operations physically remove selected quote rows and retain before snapshots in the audit log.",
+            "discount_rate is the paid-price multiplier, and may exceed one.",
+            "Official records allow nullable business metadata; provide source/source_ref evidence whenever known.",
+            "Conversion requires original_currency/original_amount/exchange_rate/rate_source.",
+            "Preview evaluates only in memory. Apply is atomic and --import-id makes retries idempotent.",
         ],
     }
 
 
 def _write_export(path: Path, items: list[QuoteResponse]) -> None:
-    rows: list[list[Any]] = []
-    for item in items:
-        value = item.model_dump(mode="json")
-        value["conditions"] = json.dumps(
-            value["conditions"], ensure_ascii=False, sort_keys=True
-        )
-        rows.append([
-            "" if value.get(column) is None else value.get(column)
-            for column in EXPORT_COLUMNS
-        ])
+    rows = [_export_values(item) for item in items]
     if path.suffix.lower() == ".xlsx":
         workbook = Workbook(write_only=True)
         sheet = workbook.create_sheet("Quotes")
@@ -125,97 +64,83 @@ def _write_export(path: Path, items: list[QuoteResponse]) -> None:
         output = BytesIO()
         workbook.save(output)
         path.write_bytes(output.getvalue())
-        return
-    with path.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(EXPORT_COLUMNS)
-        writer.writerows(rows)
-
+    else:
+        with path.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(EXPORT_COLUMNS)
+            writer.writerows(rows)
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Maintain the TokenSQL flat quote workspace."
-    )
-    parser.add_argument("--db", required=True, type=Path, help="workspace SQLite path")
+    parser = argparse.ArgumentParser(description="Maintain the normalized TokenSQL pricing workspace.")
+    parser.add_argument("--db", required=True, help="SQLite path, or :memory: for isolated checks")
     commands = parser.add_subparsers(dest="command", required=True)
-
-    commands.add_parser(
-        "schema", help="print the QuoteCreate schema and an apply envelope example"
-    )
-
-    listing = commands.add_parser("list", help="list active quotes as JSON")
-    listing.add_argument("--q")
-    listing.add_argument("--model-name")
-    listing.add_argument("--manufacturer")
-    listing.add_argument("--provider")
-    listing.add_argument("--currency")
-    listing.add_argument("--metric")
-    listing.add_argument("--dimension")
-    listing.add_argument("--limit", type=int, default=500)
-    listing.add_argument("--offset", type=int, default=0)
-
-    apply = commands.add_parser(
-        "apply",
-        help=(
-            "atomically apply JSON create/update/delete arrays; run the schema "
-            "command for a complete example"
-        ),
-    )
-    apply.add_argument("input", type=Path)
-    apply.add_argument("--actor", default="manual/cli")
-
-    export = commands.add_parser("export", help="export filtered quotes to CSV/XLSX")
-    export.add_argument("output", type=Path)
-    export.add_argument("--model-name")
-    export.add_argument("--manufacturer")
-    export.add_argument("--provider")
-    export.add_argument("--currency")
-    export.add_argument("--metric")
-    export.add_argument("--dimension")
-
+    commands.add_parser("schema", help="print exact quote and bundle JSON schemas")
+    commands.add_parser("pricing-units", help="print the closed 12-item pricing-unit dictionary")
+    commands.add_parser("pricing-context", help="read versioned FX and token-equivalence context")
+    context = commands.add_parser("context-set", help="replace context from a JSON object, retaining history")
+    context.add_argument("input", type=Path)
+    context.add_argument("--actor", default="manual/cli")
+    commands.add_parser("catalog", help="read catalog, channels, quotes and preserved legacy notice")
+    for command in ("apply", "preview", "catalog-load"):
+        operation = commands.add_parser(command, help="validate/apply a normalized pricing bundle")
+        operation.add_argument("input", type=Path)
+        operation.add_argument("--actor", default="codex/catalog" if command == "catalog-load" else "manual/cli")
+        operation.add_argument("--import-id")
+    for command in ("list", "export"):
+        operation = commands.add_parser(command)
+        for field in ("q", "model-id", "model-name", "manufacturer", "vendor", "provider", "supplier",
+                      "currency", "pricing-unit-id", "metric", "billing-item", "dimension", "tag", "supplier-model-id"):
+            operation.add_argument("--" + field)
+        if command == "list":
+            operation.add_argument("--limit", type=int, default=500)
+            operation.add_argument("--offset", type=int, default=0)
+        else:
+            operation.add_argument("output", type=Path)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = _parser()
-    args = parser.parse_args(argv)
+    args = _parser().parse_args(argv)
+    if args.command == "schema":
+        _print(_schema())
+        return 0
+    if args.command == "pricing-units":
+        _print(pricing_units_payload())
+        return 0
     store = WorkspaceStore(args.db)
     try:
-        if args.command == "schema":
-            _print(_schema())
-            return 0
-        if args.command == "list":
-            items, total = store.list_quotes(
-                q=args.q, model_name=args.model_name,
-                manufacturer=args.manufacturer, provider=args.provider,
-                currency=args.currency, metric=args.metric,
-                dimension=args.dimension, limit=args.limit, offset=args.offset,
-            )
-            _print({"items": [_response_dict(item) for item in items], "total": total})
-            return 0
-        if args.command == "apply":
-            creates, updates, deletes = _load_apply(args.input)
-            items = store.apply_changes(
-                creates=creates, updates=updates, deletes=deletes, actor=args.actor
-            )
-            _print({
-                "changes": store.change_summary(args.actor),
-                "items": [_response_dict(item) for item in items],
-            })
-            return 0
-        if args.command == "export":
-            items, _ = store.list_quotes(
-                model_name=args.model_name, manufacturer=args.manufacturer,
-                provider=args.provider, currency=args.currency, metric=args.metric,
-                dimension=args.dimension, limit=100_000, offset=0,
-            )
-            _write_export(args.output, items)
-            _print({"exported": len(items), "path": str(args.output)})
-            return 0
-        raise AssertionError(f"unsupported command: {args.command}")
+        if args.command == "pricing-context":
+            _print(store.pricing_context())
+        elif args.command == "context-set":
+            value = json.loads(args.input.read_text(encoding="utf-8"))
+            value.setdefault("actor", args.actor)
+            _print(store.set_pricing_context(**value))
+        elif args.command == "catalog":
+            _print(store.catalog_snapshot())
+        elif args.command in ("apply", "preview", "catalog-load"):
+            bundle = _load_bundle(args.input)
+            if args.command == "catalog-load" and (bundle.create or bundle.update or bundle.delete):
+                raise ValueError("catalog-load accepts only models and official_prices")
+            result = store.preview_bundle(bundle) if args.command == "preview" else store.apply_bundle(
+                bundle, args.actor, args.import_id)
+            _print(result)
+        elif args.command in ("list", "export"):
+            filters = {key: getattr(args, key) for key in
+                       ("q", "model_id", "model_name", "manufacturer", "vendor", "provider", "supplier",
+                        "currency", "pricing_unit_id", "metric", "billing_item", "dimension", "tag", "supplier_model_id")}
+            items, total = store.list_quotes(**filters,
+                limit=args.limit if args.command == "list" else 100000,
+                offset=args.offset if args.command == "list" else 0)
+            if args.command == "list":
+                _print({"items": [v.model_dump(mode="json") for v in items], "total": total,
+                        "filter_options": store.filter_options()})
+            else:
+                _write_export(args.output, items)
+                _print({"exported": len(items), "path": str(args.output)})
+        return 0
     except Exception as error:
-        _print({"error": " ".join(str(error).split())[:1000]})
+        _print({"error": " ".join(str(error).split())[:1500]})
         return 2
     finally:
         store.close()

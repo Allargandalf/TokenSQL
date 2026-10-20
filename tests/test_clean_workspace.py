@@ -103,7 +103,7 @@ def test_create_app_starts_with_only_empty_workspace_state(
             "status": "ok",
             "application": "tokensql-workspace",
         }
-        assert api.version == "2.1.0"
+        assert api.version == "2.2.0"
 
     assert manager.stopped
     database = workspace / "quotes.sqlite3"
@@ -116,9 +116,9 @@ def test_create_app_starts_with_only_empty_workspace_state(
             )
         }
         expected = {
-            "workspace_quote",
-            "workspace_audit",
-            "workspace_request",
+            "pricing_vendor", "pricing_model", "pricing_alias",
+            "pricing_official", "pricing_supplier", "pricing_channel",
+            "pricing_quote", "pricing_audit", "pricing_import",
         }
         assert expected <= tables
         assert {
@@ -139,11 +139,13 @@ def test_workspace_cli_schema_list_and_removed_legacy_command(tmp_path: Path) ->
     assert schema_result.returncode == 0, schema_result.stderr
     schema = json.loads(schema_result.stdout)
     assert "quote" in schema
-    assert set(schema["apply"]) == {"create", "update", "delete"}
+    assert set(schema["apply"]) == {"models", "official_prices", "create", "update", "delete"}
 
     list_result = _workspace_cli(database, "list")
     assert list_result.returncode == 0, list_result.stderr
-    assert json.loads(list_result.stdout) == {"items": [], "total": 0}
+    result = json.loads(list_result.stdout)
+    assert result["items"] == [] and result["total"] == 0
+    assert "filter_options" in result
 
     legacy_result = _workspace_cli(
         database, "import-legacy", str(tmp_path / "old.sqlite3")
@@ -152,12 +154,12 @@ def test_workspace_cli_schema_list_and_removed_legacy_command(tmp_path: Path) ->
     assert "invalid choice" in legacy_result.stderr
 
 
-def test_package_and_project_versions_are_2_1_0() -> None:
+def test_package_and_project_versions_are_2_2_0() -> None:
     project = tomllib.loads(
         (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     )
-    assert tokensql.__version__ == "2.1.0"
-    assert project["project"]["version"] == "2.1.0"
+    assert tokensql.__version__ == "2.2.0"
+    assert project["project"]["version"] == "2.2.0"
 
 
 def test_supported_entrypoints_import_without_legacy_modules() -> None:

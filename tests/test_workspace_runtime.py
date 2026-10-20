@@ -21,6 +21,8 @@ def test_provider_reuse_does_not_copy_shared_runtime_configuration(tmp_path):
     assert "plugin" not in result and "mcp" not in result
     assert result["permission"]["edit"]["*"] == "deny"
     assert result["permission"]["question"] == "deny"
+    assert result["permission"]["webfetch"] == "deny"
+    assert result["permission"]["websearch"] == "deny"
 
 
 def test_missing_provider_fails_without_shared_fallback(tmp_path):

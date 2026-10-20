@@ -21,7 +21,6 @@ build/
 *.sqlite
 *.sqlite3
 var/
-data/
 exports/
 
 # Database sidecars and temporary files
@@ -46,9 +45,17 @@ exports/
 secrets/
 
 # User-provided samples stay local, regardless of file format.
-/test/*
-!/test/.gitkeep
 /.private-docs/
+
+# Private file lifecycle and Codex comparison data.
+/input/*
+!/input/.gitkeep
+/progress/*
+!/progress/.gitkeep
+/data/*
+!/data/.gitkeep
+/tests/data/*
+!/tests/data/.gitkeep
 
 # Local acceptance databases, logs, and run scripts
 /var/

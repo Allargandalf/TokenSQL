@@ -1,14 +1,46 @@
 ---
-description: TokenSQL remote workspace development and OpenCode maintenance
+description: TokenSQL remote development and reviewed OpenCode pricing maintenance
 alwaysApply: true
 ---
 
-Follow the current plan.md and AGENTS.md. The primary experience is a quote grid beside an OpenCode chat, with files and a prompt sent directly to the agent for database maintenance.
+Follow current plan.md and AGENTS.md. Only tokensql.workspace is supported.
+All project operations run remotely through ssh uni; never create local project
+copies or write C-drive files. Never read handoff/private handoff or cleanup
+backup business files. Do not alter shared inference or coding services.
 
-The only application is tokensql.workspace. Do not restore the removed parser/semantic-import/review/publish pipeline, relational legacy schema, Streamlit, or legacy migration commands. Start with an empty database; never auto-import test files or cleanup backups.
+Use one unique model_id with optional display name and aliases; physical_key
+is removed. Quotes create missing models atomically, without a separate model
+approval. Other business fields may be null. New omitted currency defaults to
+CNY; explicit foreign currencies and null remain intact. Never guess token
+scale, supplier or prices to pass schema.
+When known, units use the fixed 12-item dictionary; keep partial unit evidence.
+Preserve raw amounts and raw multipliers independently, including discount-only
+records. Discount ratios are HALF_UP rounded to two decimal places in storage,
+UI-derived results and exports (0.80 = 8 zhe, 0.15 = 1.5 zhe). Use deterministic
+Decimal/BigInt code, never binary floats. Do not round amount/price/FX values;
+existing-ratio migrations require backup, atomic revisions and before/after audit. All official-price discount/paid-price calculations are frontend-only,
+exact executable code and exportable; never mutate raw stored data.
 
-All project changes and tests run on the authorized remote server. Do not create local project copies, read handoff/private handoff documents, or alter shared coding/model services.
+Frontend currency/unit controls, custom factors and converted exports are
+display-only and cannot mutate stored raw prices, global context or memory.
+Cross-dimensional estimates require clear assumptions, source/model,
+resolution/FPS and a visible estimate label. Never claim a universal token/second.
 
-Use the workspace store for validated transactional quote writes and audit records. Preserve unrelated changes; clear real data only at the user's explicit request and keep a recoverable backup outside the project. Keep agent jobs asynchronous so the quote grid stays responsive.
+OpenCode prepares proposals only. Human review confirms atomic audited writes;
+Structured clarification questions use waiting_for_input, not failed. Resume
+with the same job/session/files and revision check; isolate each attempt output,
+refresh catalog, retain waiting across restart, and never commit or remember
+while waiting. Real SDK/schema failures remain failures.
+cancel returns files and creates no formal prices or memory. Selected quotes
+are permanently deleted after one explicit UI confirmation, atomically with
+revision validation and audit; never auto-delete production data in tests.
+Do not restore
+removed fixed parsing pipelines. Never automatically import samples/backups.
+User-initiated official-price lookup uses a new scoped OpenCode session and
+the official-source index, fetches primary evidence, then human-reviewed writes.
+Confirmed corrections alone may become scoped memory outside the repository.
 
-Record actual test and deployment evidence in progress.md. Do not treat mock results as real model or browser acceptance.
+Root coordinates and independently verifies; coding/review Subagents use the
+user-requested inherited gpt-6.1-sol ultra. Preserve unrelated changes.
+Record actual evidence in progress.md; distinguish unit tests, API stubs,
+real browser, real model and real business-file validation.

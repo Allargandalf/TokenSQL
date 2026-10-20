@@ -3,6 +3,7 @@
 Run with ``python -m uvicorn tokensql.workspace.app:app --host 127.0.0.1 --port 8765``.
 """
 from contextlib import asynccontextmanager
+import asyncio
 from pathlib import Path
 import sys
 from typing import Any
@@ -14,9 +15,10 @@ from fastapi.staticfiles import StaticFiles
 from tokensql import __version__
 from .agent import AgentConfig, OpenCodeAgentManager
 from .agent_routes import create_agent_router
-from .config import WorkspaceSettings
+from .config import PROJECT_ROOT, WorkspaceSettings
 from .data_routes import create_data_router
 from .store import WorkspaceStore
+from .fx_routes import create_fx_router, refresh_loop
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -35,6 +37,11 @@ def create_app(
         config=AgentConfig(
             workspace_dir=settings.workspace_dir.resolve(),
             database_path=settings.database_path,
+            agent_dir=settings.agent_dir.resolve(),
+            input_dir=settings.input_dir.resolve(),
+            progress_dir=settings.progress_dir.resolve(),
+            data_dir=settings.data_dir.resolve(),
+            official_sources_path=PROJECT_ROOT / "docs" / "official_price_sources.md",
             python_bin=Path(sys.executable),
             server_url=settings.opencode_url,
             provider_id=settings.opencode_provider,
@@ -49,9 +56,18 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(api: FastAPI):
+        refresh_task = None
         try:
+            recover = getattr(manager, "recover", None)
+            if recover:
+                await recover()
+            if settings.fx_auto_refresh:
+                refresh_task = asyncio.create_task(refresh_loop(store, settings.fx_refresh_seconds))
             yield
         finally:
+            if refresh_task:
+                refresh_task.cancel()
+                await asyncio.gather(refresh_task, return_exceptions=True)
             await manager.shutdown()
             store.close()
 
@@ -59,6 +75,7 @@ def create_app(
     api.state.workspace_store = store
     api.state.agent_manager = manager
     api.include_router(create_data_router(store))
+    api.include_router(create_fx_router(store))
     api.include_router(create_agent_router(manager))
     api.mount("/static", StaticFiles(directory=STATIC_DIR), name="workspace-static")
 
@@ -69,7 +86,10 @@ def create_app(
 
     @api.get("/health")
     def health():
-        return {"status": "ok", "application": "tokensql-workspace"}
+        result = {"status": "ok", "application": "tokensql-workspace"}
+        if settings.test_mode:
+            result["isolated_test"] = True
+        return result
 
     return api
 

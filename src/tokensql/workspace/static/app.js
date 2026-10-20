@@ -11,12 +11,16 @@
     total: 0,
     offset: 0,
     limit: PAGE_SIZE,
-    selected: new Set(),
+    selected: new Map(),
+    deleting: false,
     files: [],
     conversationId: null,
     agentBusy: false,
+    sessionRestoring: false,
     editing: null,
     querySerial: 0,
+    catalog: { models: [], official_prices: [], suppliers: [] },
+    pricingUnits: { version: null, items: [] },
   };
 
   const $ = (id) => document.getElementById(id);
@@ -33,9 +37,10 @@
     search: $("searchInput"),
     manufacturer: $("manufacturerFilter"),
     provider: $("providerFilter"),
+    tag: $("tagFilter"),
     currency: $("currencyFilter"),
     metric: $("metricFilter"),
-    dimension: $("dimensionFilter"),
+
     syncLabel: $("syncLabel"),
     refresh: $("refreshButton"),
     filePicker: $("filePicker"),
@@ -93,7 +98,7 @@
       let detail = `请求失败（${response.status}）`;
       try {
         const payload = await response.json();
-        detail = typeof payload.detail === "string" ? payload.detail : detail;
+        detail = typeof payload.detail === "string" ? payload.detail : Array.isArray(payload.detail) ? payload.detail.map((item) => `${(item.loc || []).join(".")}: ${item.msg}`).join("\n") : detail;
       } catch (_) {
         // Keep the status-based message for non-JSON responses.
       }
@@ -109,11 +114,11 @@
     const params = new URLSearchParams();
     const fields = [
       ["q", els.search.value.trim()],
-      ["manufacturer", els.manufacturer.value],
-      ["provider", els.provider.value],
+      ["vendor", els.manufacturer.value],
+      ["supplier", els.provider.value],
+      ["tag", els.tag.value],
       ["currency", els.currency.value],
-      ["dimension", els.dimension.value],
-      ["metric", els.metric.value],
+      ["billing_item", els.metric.value],
     ];
     fields.forEach(([key, value]) => {
       if (value) params.set(key, value);
@@ -157,15 +162,78 @@
   }
 
   function applyFilterOptions(options = {}) {
-    fillOptions(els.manufacturer, options.manufacturers || options.manufacturer, "全部厂商");
-    fillOptions(els.provider, options.providers || options.provider, "全部供应商");
-    fillOptions(els.dimension, options.dimensions || options.dimension, "全部维度");
-    fillOptions(els.currency, options.currencies || options.currency, "全部币种");
-    fillOptions(els.metric, options.metrics || options.metric, "全部计费项");
+    fillOptions(els.manufacturer, options.vendors || options.manufacturers, "全部模型商");
+    fillOptions(els.provider, options.suppliers || options.providers, "全部供应商");
+    fillOptions(els.tag, options.tags, "全部标签");
+    fillOptions(els.currency, options.currencies || ["CNY", "USD", "HKD"], "全部原币");
+    fillOptions(els.metric, options.billing_items || options.metrics, "全部计费项");
   }
 
   function tableCell(text, className = "") {
     return node("td", { className, text: valueOrDash(text) });
+  }
+
+  function priceDisplay(price, className = "") {
+    const container = node("div", { className: `price-display ${className}` });
+    if (!price) { container.append(node("span", { text: "未提供价格依据" })); return container; }
+    const sourceUnit = window.TokenSQLConversion?.sourceUnit(price);
+    const rawUnit = sourceUnit?.label || [price.currency, price.unit_quantity, price.unit].filter((value) => value != null && value !== "").join(" ") || "单位未提供";
+    container.append(node("span", { text: price.amount == null ? "原金额未提供" : ((sourceUnit?.currency || price.currency) ? (sourceUnit?.currency || price.currency) + " " : "") + price.amount }),
+      node("span", { className: "muted-cell", text: rawUnit + " · 原始单位" }));
+    const display = window.TokenSQLConversion?.displayPrice(price) || price;
+    if (display !== price) container.append(node("span", { className: "display-conversion", text: "前端折后价 " + display.currency + " " + display.amount + " / " + (window.TokenSQLConversion.sourceUnit(display)?.label || "官网单位").replace(/^[A-Z]+\s*\/\s*/, "") + " · 非原始报价" }));
+    const converted = window.TokenSQLConversion?.convert(display);
+    if (converted?.status === "converted") {
+      container.append(node("span", { className: "display-conversion " + (converted.estimated ? "estimated" : "exact"), text: (converted.estimated ? "工程估算" : "显示换算") + " " + converted.currency + " " + converted.amount + " / " + converted.unitLabel }));
+      container.append(node("span", { className: "muted-cell", text: "原价 " + converted.originalCurrency + " " + converted.originalAmount + " / " + converted.originalUnitLabel + " · " + converted.formula }));
+      const evidence = node("details", { className: "price-evidence" }, [node("summary", { text: "FX 来源 / 版本 / 倍率" }), node("pre", { text: JSON.stringify(converted.evidence, null, 2) })]);
+      container.append(evidence);
+    } else if (converted?.status === "unavailable") {
+      container.append(node("span", { className: "display-conversion unavailable", text: "未换算：" + converted.reason }));
+      container.append(node("span", { className: "muted-cell", text: "已保留原价，未伪填结果。" }));
+    }
+    return container;
+  }
+
+  function priceCell(price) {
+    return node("td", { className: "number-cell" }, [priceDisplay(price)]);
+  }
+
+  function officialFor(quote) {
+    return quote.official_price || state.catalog.official_prices.find((price) => price.model_id === quote.model_id && (price.billing_item ?? null) === (quote.billing_item ?? null));
+  }
+
+  function pricingDisplay(quote) {
+    const raw = window.TokenSQLConversion?.rawDiscount(quote) ?? quote.raw_discount_rate ?? quote.discount_rate;
+    const result = node("div", { className: "price-display pricing-result" }, [
+      node("span", { text: raw == null ? "原始付款倍率未提供" : "原始付款倍率 " + raw + " × / " + window.TokenSQLConversion.discountFold(raw) + " 折", title: raw == null ? "" : "原始付款倍率按 HALF_UP 保留两位小数入库；辅助折数显示一位。" }),
+    ]);
+    if (!window.TokenSQLConversion?.state.pricing) return result;
+    const computed = window.TokenSQLConversion.computePricing(quote);
+    if (computed.calculatedDiscount != null) result.append(node("span", {
+      className: computed.estimated ? "estimated" : "display-conversion",
+      text: (computed.estimated ? "工程估算倍率 " : "前端反算倍率 ") + computed.calculatedDiscount + " × / " + computed.calculatedDiscountFold + " 折" + (computed.discountRounded ? "（两位舍入）" : ""),
+      title: "未舍入付款倍率：" + computed.discountNumerator + " / " + computed.discountDenominator + "；倍率按 HALF_UP 显示两位小数，辅助折数由两位倍率计算；不保存反算结果。" }));
+    if (computed.derivedAmount != null) result.append(node("span", { className: "muted-cell",
+      text: "官网价 × 原始倍率 → " + computed.derivedAmount + " " + computed.officialUnit.label + "（仅显示）" }));
+    if (computed.reason || computed.discountIssue) result.append(node("span", { className: "display-conversion unavailable",
+      text: computed.reason || computed.discountIssue }));
+    if (computed.missingOfficial) {
+      const lookup = node("button", { className: "text-button official-lookup", type: "button", text: "联网补官网价（新会话）" });
+      lookup.addEventListener("click", () => window.TokenSQLReview?.lookupOfficial(quote));
+      result.append(lookup);
+    }
+    if (computed.evidence) result.append(node("details", { className: "price-evidence" },
+      [node("summary", { text: "前端计算依据（不写库）" }), node("pre", { text: JSON.stringify(computed.evidence, null, 2) })]));
+    return result;
+  }
+
+  function officialCell(quote) {
+    const official = officialFor(quote);
+    if (official?.amount != null) return priceCell(official);
+    const button = node("button", { className: "text-button official-lookup", type: "button", text: "缺失官网价 · 联网补全" });
+    button.addEventListener("click", () => window.TokenSQLReview?.lookupOfficial(quote));
+    return node("td", { className: "number-cell" }, [priceDisplay(official), button]);
   }
 
   function renderRows() {
@@ -173,83 +241,103 @@
     for (const quote of state.items) {
       const row = node("tr");
       row.dataset.id = String(quote.id);
-      if (state.selected.has(quote.id)) row.classList.add("is-selected");
-
-      const check = node("input", { type: "checkbox", ariaLabel: `选择 ${quote.model_name}` });
+      row.classList.toggle("is-selected", state.selected.has(quote.id));
+      const check = node("input", { type: "checkbox", ariaLabel: `选择 ${quote.model_name || quote.model_id}` });
       check.checked = state.selected.has(quote.id);
       check.addEventListener("change", () => {
-        check.checked ? state.selected.add(quote.id) : state.selected.delete(quote.id);
-        updateSelection();
-        renderRows();
+        check.checked ? state.selected.set(quote.id, quote.revision) : state.selected.delete(quote.id);
+        updateSelection(); renderRows();
       });
-      const checkCell = node("td", { className: "check-cell" }, [check]);
-
-      const name = node("span", { className: "model-name", text: valueOrDash(quote.model_name), title: valueOrDash(quote.model_name) });
-      const version = node("span", { className: "model-version", text: quote.model_version || "" });
-      const modelCell = node("td", { className: "model-cell" }, [name, version]);
-
-      const metricBadge = node("span", { className: "metric-badge", text: valueOrDash(quote.metric) });
-      const metricCell = node("td", {}, [metricBadge]);
-      const discountRate = Number(quote.discount_rate);
-      const displayAmount = quote.component_type === "discount" && Number.isFinite(discountRate)
-        ? `${(discountRate * 10).toLocaleString("zh-CN", { maximumFractionDigits: 4 })} 折` : quote.amount;
-      const amountCell = tableCell(displayAmount, "number-cell");
-
-      const unitCell = quote.component_type === "discount"
-        ? node("td", {}, [node("span", { text: "相对目录价" }), node("span", { className: "muted-cell", text: "折扣率" })])
-        : node("td", {}, [
-          node("span", { text: valueOrDash(quote.currency) }),
-          node("span", { className: "muted-cell", text: `/ ${valueOrDash(quote.unit_quantity)} ${valueOrDash(quote.unit)}` }),
-        ]);
-      const sourceCell = node("td", {}, [
-        node("span", { text: valueOrDash(quote.source), title: valueOrDash(quote.source) }),
-        node("span", { className: "muted-cell", text: quote.updated_at ? `更新于 ${formatDateTime(quote.updated_at)}` : "" }),
+      const modelCell = node("td", { className: "model-cell" }, [
+        node("span", { className: "model-name", text: quote.model_name || quote.model_id }),
+        node("span", { className: "model-version", text: quote.model_id }),
       ]);
-
-      const exportButton = node("button", {
-        className: "icon-button table-action",
-        text: "↗",
-        type: "button",
-        title: `导出 ${quote.model_name} 的全部报价`,
-        ariaLabel: `导出 ${quote.model_name} 的全部报价`,
-      });
-      exportButton.addEventListener("click", (event) => {
-        event.stopPropagation();
-        exportQuotes(new URLSearchParams({ format: $("exportFormat").value, model_name: quote.model_name }));
-      });
-
-      row.append(
-        checkCell,
-        modelCell,
-        tableCell(quote.manufacturer),
-        tableCell(quote.provider),
-        metricCell,
-        amountCell,
-        unitCell,
-        tableCell(formatDate(quote.effective_date)),
-        sourceCell,
-        node("td", { className: "action-cell" }, [exportButton]),
-      );
+      const supplierCell = node("td", {}, [
+        node("span", { text: valueOrDash(quote.supplier || quote.provider) }),
+        node("span", { className: "muted-cell", text: quote.supplier_model_id || "未指定渠道 ID" }),
+        node("div", { className: "tag-list" }, (quote.tags || []).map((tag) => node("span", { className: "metric-badge", text: tag }))),
+      ]);
+      const actions = node("td", { className: "action-cell" });
+      for (const [text, label, handler] of [
+        ["编辑", "编辑报价", () => openEditor(quote)],
+        ["导出", "导出此模型", () => exportQuotes(new URLSearchParams({ format: $("exportFormat").value, model_id: quote.model_id }))],
+        ["删除", "删除报价", () => deleteQuote(quote)],
+      ]) {
+        const button = node("button", { className: "text-button table-action", text, type: "button", ariaLabel: `${label} ${quote.model_id}` });
+        button.addEventListener("click", (event) => { event.stopPropagation(); handler(); });
+        actions.append(button);
+      }
+      row.append(node("td", { className: "check-cell" }, [check]), modelCell,
+        tableCell(quote.vendor || quote.manufacturer), supplierCell,
+        node("td", {}, [node("span", { className: "metric-badge", text: valueOrDash(quote.billing_item || quote.metric) })]),
+        officialCell(quote), priceCell(quote),
+        node("td", { className: "number-cell" }, [pricingDisplay(quote)]),
+        node("td", {}, [node("span", { text: quote.source || "—" }), node("span", { className: "muted-cell", text: quote.source_ref || "" })]), actions);
       row.addEventListener("dblclick", (event) => {
-        if (event.target instanceof HTMLInputElement || event.target instanceof HTMLButtonElement) return;
-        openEditor(quote);
+        if (!event.target.closest("button,input")) openEditor(quote);
       });
-      row.addEventListener("keydown", (event) => {
-        if (event.key === "Enter") {
-          event.preventDefault();
-          openEditor(quote);
-        }
-      });
-      row.tabIndex = 0;
-      row.title = "双击编辑";
       els.quoteRows.append(row);
     }
+  }
+
+  async function deleteQuote(quote) {
+    if (state.deleting || !window.confirm(`永久删除 ${quote.model_id} 的这条报价？确认后直接清空，不能撤销；不会删除模型、官网价或归档文件。`)) return;
+    state.deleting = true; updateSelection();
+    try {
+      await api(`/quotes/${quote.id}?expected_revision=${quote.revision}`, { method: "DELETE" });
+      state.selected.delete(quote.id);
+      toast("报价已永久删除");
+      await loadQuotes({ quiet: true });
+    } catch (error) {
+      toast(error.status === 409 ? "报价已被修改，本次未删除。请刷新后重新选择。" : error.message, true);
+      if ([404, 409].includes(error.status)) { state.selected.clear(); await loadQuotes({ quiet: true }); }
+    } finally { state.deleting = false; updateSelection(); }
+  }
+
+  async function deleteSelected() {
+    if (state.deleting || !state.selected.size) return;
+    const items = [...state.selected].map(([id, expected_revision]) => ({ id, expected_revision }));
+    if (!window.confirm(`永久删除所选 ${items.length} 条报价（包含其他页的选择）？确认后直接清空，不能撤销；不会删除模型、官网价或归档文件。`)) return;
+    state.deleting = true; updateSelection();
+    try {
+      const result = await api("/quotes/bulk-delete", { method: "POST", body: JSON.stringify({ items, actor: "workspace-ui" }) });
+      (result.deleted_ids || items.map((item) => item.id)).forEach((id) => state.selected.delete(id));
+      state.offset = 0;
+      toast(`已永久删除 ${result.deleted} 条报价`);
+      await loadQuotes({ quiet: true });
+    } catch (error) {
+      toast(error.status === 409 ? "所选报价有版本变化，本批次全部未删除。已刷新，请重新选择。" : error.status === 404 ? "所选报价有记录已不存在，本批次全部未删除。已刷新，请重新选择。" : error.message, true);
+      if ([404, 409].includes(error.status)) { state.selected.clear(); await loadQuotes({ quiet: true }); }
+    } finally { state.deleting = false; updateSelection(); }
+  }
+
+  async function loadCatalog() {
+    state.catalog = await api("/catalog");
+    renderRows();
+    return state.catalog;
+  }
+
+  async function loadPricingUnits() {
+    state.pricingUnits = await api("/pricing-units");
+    const select = formField("pricing_unit_id");
+    if (select) {
+      const active = select.value;
+      const empty = node("option", { text: "未提供 / 不明确（可留空）" }); empty.value = "";
+      select.replaceChildren(empty, ...state.pricingUnits.items.map((unit) => {
+        const option = node("option", { text: unit.label || unit.currency + " / " + unit.scale });
+        option.value = unit.id;
+        return option;
+      }));
+      if ([...select.options].some((option) => option.value === active)) select.value = active;
+    }
+    return state.pricingUnits;
   }
 
   function updateSelection() {
     const count = state.selected.size;
     els.selectionBar.hidden = count === 0;
     els.selectedCount.textContent = String(count);
+    $("deleteSelectedButton").disabled = state.deleting || !count;
     const currentIds = state.items.map((item) => item.id);
     els.selectAll.checked = currentIds.length > 0 && currentIds.every((id) => state.selected.has(id));
     els.selectAll.indeterminate = currentIds.some((id) => state.selected.has(id)) && !els.selectAll.checked;
@@ -294,7 +382,7 @@
 
   function clearFilters() {
     els.search.value = "";
-    [els.manufacturer, els.provider, els.currency, els.metric, els.dimension].forEach((select) => { select.value = ""; });
+    [els.manufacturer, els.provider, els.tag, els.metric, els.currency].forEach((select) => { select.value = ""; });
     state.offset = 0;
     state.selected.clear();
     updateSelection();
@@ -320,7 +408,11 @@
     return candidate.replace(/[\\/:*?"<>|]/g, "_");
   }
 
-  async function exportQuotes(params) {
+  async function exportQuotes(params, displayItems = null) {
+    if (window.TokenSQLConversion?.isActive()) {
+      await window.TokenSQLConversion.exportConverted(params, displayItems);
+      return;
+    }
     try {
       const response = await fetch(`${API_BASE}/exports?${params}`, { credentials: "same-origin" });
       if (!response.ok) {
@@ -354,92 +446,102 @@
     state.editing = quote;
     els.editorTitle.textContent = quote ? "编辑报价" : "新增报价";
     els.formError.textContent = "";
-    const defaults = {
-      model_name: "", model_version: "", manufacturer: "", provider: "", provider_type: "unknown", component_type: "monetary",
-      amount: "", discount_rate: "", currency: "CNY", unit: "token", unit_quantity: "1000000",
-      metric: "input_tokens", dimension: "token", direction: "input", effective_date: "",
-      source: "", source_ref: "", conditions: {}, note: "",
-    };
-    const values = { ...defaults, ...(quote || {}) };
-    for (const name of Object.keys(defaults)) {
+    const modelSelect = formField("model_id");
+    $("modelIdentifiers").replaceChildren(...state.catalog.models.map((model) => {
+      const option = node("option", { text: `${valueOrDash(model.vendor)} · ${model.model_name || model.model_id}` });
+      option.value = model.model_id;
+      return option;
+    }));
+    $("supplierNames").replaceChildren(...state.catalog.suppliers.map((supplier) => {
+      const option = node("option"); option.value = supplier.name; return option;
+    }));
+    const legacyUnit = quote && !quote.pricing_unit_id ? state.pricingUnits.items.find((unit) =>
+      unit.currency === quote.currency && unit.unit === quote.unit && String(unit.unit_quantity) === String(quote.unit_quantity)) : null;
+    const values = { model_id: "", billing_item: "", supplier: "", tags: [], supplier_model_id: "",
+      amount: "", discount_rate: "", pricing_unit_id: "", currency: "CNY",
+      source: "", source_ref: "", conditions: {}, note: "", ...(quote || {}) };
+    values.pricing_unit_id = quote?.pricing_unit_id || legacyUnit?.id || values.pricing_unit_id;
+    const originalDiscount = quote?.raw_discount_rate ?? quote?.discount_rate ?? null;
+    values.discount_rate = window.TokenSQLConversion?.discountFold(originalDiscount) ?? "";
+    formField("discount_rate").dataset.originalRatio = window.TokenSQLConversion.discountRatio(originalDiscount) ?? "";
+    formField("discount_rate").dataset.initialFold = values.discount_rate;
+    formField("discount_rate").title = originalDiscount == null ? "以折为单位；8.0 代表八折。" : "原始付款倍率：" + window.TokenSQLConversion.discountRatio(originalDiscount) + " ×；保存时倍率统一为两位小数。";
+    Object.keys(values).forEach((name) => {
       const field = formField(name);
-      if (!field) continue;
-      if (name === "conditions") field.value = JSON.stringify(values.conditions || {}, null, 2);
-      else if (name === "effective_date") field.value = values[name] ? String(values[name]).slice(0, 10) : "";
-      else field.value = values[name] ?? "";
-    }
+      if (!field) return;
+      field.value = name === "tags" ? (values.tags || []).join(", ") : name === "conditions" ? (values.conditions == null ? "" : JSON.stringify(values.conditions, null, 2)) : values[name] ?? "";
+    });
     updateComponentFields();
     els.editor.showModal();
-    window.setTimeout(() => formField("model_name").focus(), 30);
+    modelSelect.focus();
+    calculateQuotePreview();
   }
 
   function updateComponentFields() {
-    const isDiscount = formField("component_type").value === "discount";
-    els.quoteForm.querySelector("[data-money-field]").hidden = isDiscount;
-    els.quoteForm.querySelector("[data-discount-field]").hidden = !isDiscount;
-    formField("amount").required = !isDiscount;
-    formField("discount_rate").required = isDiscount;
-    ["currency", "unit", "unit_quantity"].forEach((name) => {
-      formField(name).required = !isDiscount;
-    });
+    formField("amount").required = false;
+    formField("discount_rate").required = false;
+    const model = state.catalog.models.find((item) => item.model_id === formField("model_id").value);
+    $("editorModelInfo").textContent = model ? `模型商：${valueOrDash(model.vendor)} · 别名：${(model.aliases || []).join(", ") || "无"}` : "输入新模型 ID 即可；确认报价时自动创建缺失模型，无需先审核实体。";
+  }
+
+  function quoteFormItem() {
+    const item = { pricing_unit_id: formField("pricing_unit_id").value || null, currency: formField("currency").value || null };
+    ["model_id", "billing_item", "supplier", "supplier_model_id", "source", "source_ref", "note"].forEach((name) => { item[name] = formField(name).value.trim(); });
+    item.amount = formField("amount").value.trim() || null;
+    const discountInput = formField("discount_rate");
+    const fold = discountInput.value.trim();
+    item.discount_rate = fold === discountInput.dataset.initialFold && discountInput.dataset.originalRatio !== ""
+      ? window.TokenSQLConversion.discountRatio(discountInput.dataset.originalRatio) : window.TokenSQLConversion.ratioFromFold(fold);
+    ["billing_item", "supplier", "supplier_model_id", "source", "source_ref", "note"].forEach((key) => { if (!item[key]) item[key] = null; });
+    if (!item.supplier_model_id) item.supplier_model_id = null;
+    item.tags = formField("tags").value.split(/[,，]/).map((value) => value.trim()).filter(Boolean);
+    item.conditions = JSON.parse(formField("conditions").value.trim() || "null");
+    if (item.conditions !== null && (Array.isArray(item.conditions) || typeof item.conditions !== "object")) throw new Error("条件必须是 JSON 对象或留空");
+    if (state.editing && !state.editing.pricing_unit_id && !item.pricing_unit_id) {
+      ["unit", "unit_quantity"].forEach((key) => { if (state.editing[key] != null) item[key] = state.editing[key]; });
+    }
+    return item;
+  }
+
+  let previewTimer = null;
+  let previewSerial = 0;
+  async function calculateQuotePreview() {
+    const serial = ++previewSerial;
+    try {
+      const item = quoteFormItem();
+      if (!item.model_id) {
+        $("quotePreview").textContent = "只需输入模型 ID；其余字段均可留空。币种默认人民币，计价尺度不猜测。";
+        return;
+      }
+      if (serial !== previewSerial) return;
+      const computed = window.TokenSQLConversion?.computePricing(item);
+      $("quotePreview").replaceChildren(node("strong", { text: "前端计算预览 · 不反填保存 · 缺字段也可保存" }),
+        priceDisplay(item),
+        node("p", { text: computed?.calculatedDiscount == null ? computed?.reason || computed?.discountIssue || "未提供原金额，不能反算倍率" : "前端反算付款倍率：" + computed.calculatedDiscount + " × / " + computed.calculatedDiscountFold + " 折" + (computed.discountRounded ? "（两位舍入）" : "") }),
+        node("p", { text: computed?.derivedAmount == null ? "未提供原始倍率或官网价，未推导折后价。" : "前端折后价：" + computed.derivedAmount + " " + computed.officialUnit.label }),
+        node("small", { text: "这里所有计算结果均为临时显示。保存仅使用上方原始输入。" }));
+    } catch (error) { if (serial === previewSerial) $("quotePreview").textContent = error.message; }
   }
 
   async function saveQuote() {
     if (!els.quoteForm.reportValidity()) return;
-    const isDiscount = formField("component_type").value === "discount";
-    if (isDiscount) {
-      const rate = Number(formField("discount_rate").value);
-      if (!Number.isFinite(rate) || rate <= 0 || rate > 1) {
-        els.formError.textContent = "折扣率必须大于 0 且不超过 1，例如 0.31 表示 3.1 折。";
-        formField("discount_rate").focus();
-        return;
-      }
-    }
-    let conditions;
-    try {
-      conditions = JSON.parse(formField("conditions").value.trim() || "{}");
-      if (!conditions || Array.isArray(conditions) || typeof conditions !== "object") throw new Error();
-    } catch (_) {
-      els.formError.textContent = "条件必须是 JSON 对象，例如 {\"region\": \"cn\"}。";
-      formField("conditions").focus();
-      return;
-    }
-    const fields = [
-      "model_name", "model_version", "manufacturer", "provider", "provider_type", "component_type",
-      "amount", "discount_rate", "currency", "unit", "unit_quantity", "metric",
-      "dimension", "direction", "effective_date", "source", "source_ref", "note",
-    ];
-    const item = { conditions };
-    fields.forEach((name) => { item[name] = formField(name).value.trim(); });
-    ["model_version", "manufacturer", "amount", "discount_rate", "currency", "unit", "unit_quantity", "dimension", "effective_date", "source", "source_ref", "note"].forEach((name) => {
-      if (!item[name]) item[name] = null;
-    });
-    item.amount = isDiscount ? null : item.amount;
-    item.discount_rate = isDiscount ? item.discount_rate : null;
-    if (!item.unit_quantity) item.unit_quantity = "1";
+    let item;
+    try { item = quoteFormItem(); } catch (error) { els.formError.textContent = error.message; return; }
     els.saveQuote.disabled = true;
     els.formError.textContent = "";
     try {
       if (state.editing) {
-        await api(`/quotes/${state.editing.id}`, {
-          method: "PATCH",
-          body: JSON.stringify({ ...item, expected_revision: state.editing.revision }),
-        });
-        toast("报价已更新");
+        await api(`/quotes/${state.editing.id}`, { method: "PATCH", body: JSON.stringify({ ...item, expected_revision: state.editing.revision }) });
       } else {
         await api("/quotes", { method: "POST", body: JSON.stringify({ items: [item] }) });
-        toast("报价已新增");
       }
+      toast(state.editing ? "报价已更新" : "报价已新增");
       els.editor.close();
-      await loadQuotes({ quiet: true });
+      await Promise.all([loadQuotes({ quiet: true }), loadCatalog()]);
     } catch (error) {
-      els.formError.textContent = error.status === 409
-        ? "这条报价已被其他操作更新。表格已经刷新，请重新打开后编辑。"
-        : error.message;
+      els.formError.textContent = error.status === 409 ? "报价版本已变化，请刷新后重新编辑。" : error.message;
       if (error.status === 409) loadQuotes({ quiet: true });
-    } finally {
-      els.saveQuote.disabled = false;
-    }
+    } finally { els.saveQuote.disabled = false; }
   }
 
   function fileKey(file) {
@@ -447,6 +549,7 @@
   }
 
   function addFiles(fileList) {
+    if (Array.from(fileList || []).length && window.TokenSQLReview && !window.TokenSQLReview.canAttachFiles()) return;
     const existing = new Set(state.files.map(fileKey));
     for (const file of Array.from(fileList || [])) {
       if (state.files.length >= MAX_FILE_COUNT) {
@@ -521,7 +624,7 @@
     }
     if (changes) {
       const summary = node("div", { className: "change-summary" });
-      const labels = [["added", "新增"], ["updated", "更新"], ["deleted", "删除"], ["total", "合计"]];
+      const labels = [["added", "新增"], ["updated", "更新"], ["deleted", "删除"], ["models", "模型"], ["official_prices", "官网计费项"], ["total", "合计"]];
       labels.forEach(([key, label]) => {
         if (changes[key] !== undefined && changes[key] !== null) {
           summary.append(node("span", { text: `${label} ${changes[key]}` }));
@@ -538,7 +641,7 @@
   function appendProgress() {
     const article = node("article", { className: "message assistant" });
     article.append(node("div", { className: "message-label", text: "OPENCODE" }));
-    const label = node("span", { text: "正在读取文件并维护数据库…" });
+    const label = node("span", { text: "正在分析文件并生成待审核方案…" });
     const activity = node("div", { className: "tool-steps live" });
     const body = node("div", { className: "message-body" }, [
       node("div", { className: "run-progress" }, [node("div", { className: "spinner" }), label]),
@@ -560,7 +663,7 @@
       const status = await api("/agent/status");
       setAgentStatus(Boolean(status.available), status.available ? "可用" : (status.status || "不可用"));
       els.agentStatus.title = status.model || status.status || "";
-      els.send.disabled = !status.available || state.agentBusy;
+      els.send.disabled = !status.available || state.agentBusy || state.sessionRestoring;
     } catch (_) {
       setAgentStatus(false, "未连接");
       els.send.disabled = true;
@@ -568,67 +671,7 @@
   }
 
   async function sendPrompt() {
-    const prompt = els.prompt.value.trim();
-    if ((!prompt && state.files.length === 0) || state.agentBusy) return;
-    const sentFiles = [...state.files];
-    appendMessage("user", prompt || "请处理这些文件。", sentFiles.map((file) => file.name));
-    els.prompt.value = "";
-    state.files = [];
-    renderFileChips();
-    state.agentBusy = true;
-    els.send.disabled = true;
-    const progress = appendProgress();
-
-    try {
-      const form = new FormData();
-      form.append("prompt", prompt || "请分析附件并根据其中的信息维护报价数据库。");
-      if (state.conversationId) form.append("conversation_id", state.conversationId);
-      sentFiles.forEach((file) => form.append("files", file, file.name));
-      const accepted = await api("/agent/messages", { method: "POST", body: form });
-      state.conversationId = accepted.conversation_id || state.conversationId;
-      await pollRun(accepted.run_id, progress);
-    } catch (error) {
-      progress.article.remove();
-      appendMessage("assistant", `执行失败：${error.message}`);
-      toast(error.message, true);
-    } finally {
-      state.agentBusy = false;
-      await checkAgent();
-    }
-  }
-
-  async function pollRun(runId, progress) {
-    if (!runId) throw new Error("服务没有返回任务编号");
-    for (;;) {
-      await new Promise((resolve) => window.setTimeout(resolve, POLL_INTERVAL));
-      const run = await api(`/agent/runs/${encodeURIComponent(runId)}`);
-      state.conversationId = run.conversation_id || state.conversationId;
-      renderToolActivity(progress.activity, run.messages);
-      if (run.status === "queued") {
-        progress.label.textContent = "任务已排队，正在等待 OpenCode…";
-        continue;
-      }
-      if (run.status === "running") {
-        progress.label.textContent = "OpenCode 正在分析文件并写入数据库…";
-        continue;
-      }
-      progress.article.remove();
-      if (run.status === "completed") {
-        const message = run.assistant_message || finalAssistantMessage(run.messages) || "处理完成，报价数据已刷新。";
-        appendMessage("assistant", message, [], run.changes || null, run.messages);
-        await loadQuotes({ quiet: true });
-        return;
-      }
-      if (run.status === "failed") {
-        const message = `执行失败：${run.error || run.assistant_message || "OpenCode 未能完成任务"}`;
-        appendMessage("assistant", message, [], run.changes || null, run.messages);
-        if (Number(run.changes?.total || 0) > 0) await loadQuotes({ quiet: true });
-        toast(run.error || "OpenCode 任务执行失败", true);
-        return;
-      }
-
-      throw new Error(run.error || "OpenCode 任务执行失败");
-    }
+    if (window.TokenSQLReview) await window.TokenSQLReview.sendPrompt();
   }
 
   function finalAssistantMessage(messages) {
@@ -651,7 +694,7 @@
       loadQuotes();
     }, 280);
   });
-  [els.manufacturer, els.provider, els.currency, els.metric, els.dimension].forEach((select) => {
+  [els.manufacturer, els.provider, els.tag, els.metric, els.currency].forEach((select) => {
     select.addEventListener("change", () => {
       state.offset = 0;
       state.selected.clear();
@@ -672,7 +715,7 @@
     loadQuotes();
   });
   els.selectAll.addEventListener("change", () => {
-    state.items.forEach((item) => els.selectAll.checked ? state.selected.add(item.id) : state.selected.delete(item.id));
+    state.items.forEach((item) => els.selectAll.checked ? state.selected.set(item.id, item.revision) : state.selected.delete(item.id));
     renderRows();
     updateSelection();
   });
@@ -683,8 +726,9 @@
   });
   $("exportSelectedButton").addEventListener("click", () => {
     if (!state.selected.size) return;
-    exportQuotes(new URLSearchParams({ format: $("exportFormat").value, ids: [...state.selected].join(",") }));
+    exportQuotes(new URLSearchParams({ format: $("exportFormat").value, ids: [...state.selected.keys()].join(",") }));
   });
+  $("deleteSelectedButton").addEventListener("click", deleteSelected);
   $("exportFilteredButton").addEventListener("click", () => {
     const params = currentFilters(false);
     params.set("format", $("exportFormat").value);
@@ -693,9 +737,20 @@
 
   els.quoteForm.addEventListener("submit", (event) => {
     event.preventDefault();
-    saveQuote();
   });
-  formField("component_type").addEventListener("change", updateComponentFields);
+  els.quoteForm.addEventListener("keydown", (event) => { if (event.key === "Enter" && event.target.tagName !== "TEXTAREA") event.preventDefault(); });
+  els.saveQuote.addEventListener("click", saveQuote);
+  els.quoteForm.addEventListener("input", (event) => {
+    const unitField = formField("pricing_unit_id");
+    const currencyField = formField("currency");
+    const selectedUnit = state.pricingUnits.items.find((unit) => unit.id === unitField.value);
+    if (event.target === unitField && selectedUnit) currencyField.value = selectedUnit.currency;
+    if (event.target === currencyField && selectedUnit) {
+      const matching = state.pricingUnits.items.find((unit) => unit.currency === currencyField.value && unit.scale === selectedUnit.scale);
+      unitField.value = matching?.id || "";
+    }
+    updateComponentFields(); window.clearTimeout(previewTimer); previewTimer = window.setTimeout(calculateQuotePreview, 350);
+  });
   document.querySelectorAll("[data-close-editor]").forEach((button) => {
     button.addEventListener("click", () => els.editor.close());
   });
@@ -704,6 +759,7 @@
   });
 
   function pickFiles() {
+    if (window.TokenSQLReview && !window.TokenSQLReview.canAttachFiles()) return;
     els.filePicker.value = "";
     els.filePicker.click();
   }
@@ -753,6 +809,7 @@
     });
   });
 
-  Promise.allSettled([loadQuotes(), checkAgent()]);
+  window.TokenSQL = { state, els, $, node, api, toast, priceDisplay, pricingDisplay, renderRows, loadQuotes, loadCatalog, loadPricingUnits, appendMessage, appendProgress, renderToolActivity, checkAgent, addFiles, renderFileChips };
+  Promise.allSettled([loadPricingUnits().catch((error) => toast(error.message, true)), loadQuotes(), loadCatalog().catch((error) => toast(error.message, true)), checkAgent()]);
   window.setInterval(checkAgent, 30000);
 })();
