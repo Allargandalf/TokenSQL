@@ -103,7 +103,7 @@ def main():
             page.goto(base + "/workspace", wait_until="networkidle")
             expect(page.locator("#quoteRows tr")).to_have_count(4)
             page.locator("#pricingConversionButton").click()
-            expect(page.locator("#quoteRows")).to_contain_text("前端反算倍率 0.60 × / 6.0 折")
+            expect(page.locator("#quoteRows")).to_contain_text("按官网反算折扣 6.0折")
             expect(page.locator("#quoteRows")).to_contain_text("前端折后价 CNY 16")
             expect(page.locator("#quoteRows")).to_contain_text("缺失官网价")
             assert not {"null", "undefined"} & set(page.locator("#quoteRows td > span").all_text_contents())
@@ -117,12 +117,12 @@ def main():
                     book = load_workbook(BytesIO(output), read_only=True)
                     rows = list(book.active.iter_rows(values_only=True))
                     assert len(rows) == 5
-                    assert "原始付款倍率（两位小数）" in rows[0] and "前端折后价" in rows[0]
-                    assert "原始折扣（折，一位小数）" in rows[0] and "前端反算折扣（折，一位小数）" in rows[0]
-                    fold_index = rows[0].index("前端反算折扣（折，一位小数）")
+                    assert "原始存储折扣值（两位小数）" in rows[0] and "前端折后价" in rows[0]
+                    assert "源折扣（折，一位小数）" in rows[0] and "按官网反算折扣（折，一位小数）" in rows[0]
+                    fold_index = rows[0].index("按官网反算折扣（折，一位小数）")
                     assert any(row[fold_index] == "6.0" for row in rows[1:])
                     derived_index = rows[0].index("前端折后价")
-                    rate_index = rows[0].index("前端反算付款倍率（两位小数）")
+                    rate_index = rows[0].index("按官网反算折扣值（两位小数）")
                     assert any(row[derived_index] == "16" for row in rows[1:])
                     assert any(row[rate_index] == "0.60" for row in rows[1:])
             page.screenshot(path=str(args.evidence_dir / "real-desktop.png"), full_page=True)

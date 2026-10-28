@@ -7,6 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from .discount import normalize_discount_rate
+from .pricing_conditions import DiscountItem, OfficialMatch, PricingConditions
 from .units import PricingUnitId, expand_price_payload
 
 ProviderType = Literal["official", "reseller", "aggregator", "internal", "unknown"]
@@ -33,12 +34,12 @@ class Contract(BaseModel):
     @field_validator("*", mode="before")
     @classmethod
     def exact_numbers(cls, value: Any, info: ValidationInfo) -> Any:
-        if value is None and info.field_name in {"aliases", "tags", "models", "official_prices", "create", "update", "delete"}:
+        if value is None and info.field_name in {"aliases", "tags", "models", "official_prices", "create", "update", "delete", "discount_items"}:
             return []
-        if value is None and info.field_name in {"conditions"}:
+        if value is None and info.field_name in {"conditions", "pricing_conditions"}:
             return {}
         nullable_business = {
-            "vendor", "model_name", "billing_item", "supplier", "supplier_model_id",
+            "vendor", "model_name", "billing_item", "billing_metric", "supplier", "supplier_model_id",
             "provider_type", "amount", "discount_rate", "pricing_basis", "pricing_unit_id", "currency",
             "unit", "unit_quantity", "component_type", "conversion", "dimension", "direction",
             "effective_date", "source", "source_ref", "note", "explicit_official",
@@ -96,6 +97,10 @@ class ModelCreate(Contract):
 
 class OfficialPriceCreate(Contract):
     model_id: str
+    official_price_id: str | None = Field(default=None, min_length=1, max_length=128)
+    billing_metric: str | None = None
+    pricing_conditions: PricingConditions = Field(default_factory=PricingConditions)
+    conditions: dict[str, Any] = Field(default_factory=dict)
     billing_item: str | None = None
     amount: Decimal | None = Field(default=None, ge=0, allow_inf_nan=False)
     pricing_unit_id: PricingUnitId | None = None
@@ -120,7 +125,7 @@ class OfficialPriceCreate(Contract):
     def required(cls, value: str) -> str:
         return _required_text(value)
 
-    @field_validator("billing_item", "unit")
+    @field_validator("unit")
     @classmethod
     def lower(cls, value: str | None) -> str | None:
         return value.casefold() if value is not None else None
@@ -128,6 +133,10 @@ class OfficialPriceCreate(Contract):
 
 class QuoteFields(Contract):
     model_id: str
+    billing_metric: str | None = None
+    pricing_conditions: PricingConditions = Field(default_factory=PricingConditions)
+    discount_scope: Literal["unknown", "model", "items"] = "unknown"
+    discount_items: list[DiscountItem] = Field(default_factory=list)
     billing_item: str | None = None
     supplier: str | None = None
     supplier_model_id: str | None = None
@@ -163,7 +172,7 @@ class QuoteFields(Contract):
     def required(cls, value: str | None) -> str | None:
         return _required_text(value) if value is not None else None
 
-    @field_validator("billing_item", "unit")
+    @field_validator("unit")
     @classmethod
     def lower(cls, value: str | None) -> str | None:
         return value.casefold() if value is not None else None
@@ -186,6 +195,10 @@ class QuoteCreate(QuoteFields):
 
 class QuotePatch(Contract):
     expected_revision: int = Field(ge=1)
+    billing_metric: str | None = None
+    pricing_conditions: PricingConditions | None = None
+    discount_scope: Literal["unknown", "model", "items"] | None = None
+    discount_items: list[DiscountItem] | None = None
     actor: str = "workspace-ui"
     model_id: str | None = None
     billing_item: str | None = None
@@ -326,6 +339,9 @@ class QuoteResponse(QuoteFields):
     created_at: datetime
     updated_at: datetime
     official_price: dict[str, Any] | None = None
+    official_prices: list[dict[str, Any]] = Field(default_factory=list)
+    effective_discount_rules: list[dict[str, Any]] = Field(default_factory=list)
+    official_match: OfficialMatch = Field(default_factory=lambda: OfficialMatch(status="missing", reason="no_official_prices"))
     pricing_issue: str | None = None
     legacy_unit: dict[str, Any] | None = None
     raw_discount_rate: Decimal | None = None

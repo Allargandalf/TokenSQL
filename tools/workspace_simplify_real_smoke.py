@@ -79,7 +79,7 @@ def main():
             assert first["discount_rate"] == "0.15" and first["currency"] == "CNY"
             assert first["pricing_unit_id"] is None and first["unit_quantity"] is None
             assert len(request("catalog")["models"]) == 1
-            expect(page.locator("#quoteRows")).to_contain_text("原始付款倍率 0.15 × / 1.5 折")
+            expect(page.locator("#quoteRows")).to_contain_text("源折扣 1.5折")
             assert "物理标识" not in page.content()
             seeded = request("quotes", {"items":[
                 {"model_id":"qa-high-precision","discount_rate":"0.1555","currency":"USD",
@@ -111,15 +111,15 @@ def main():
                 assert current["currency"] == item["currency"]
                 assert current["amount"] == item["amount"]
             job = request("imports/drafts", {"bundle":{"official_prices":[{
-                "model_id":"qa-new-without-entity","amount":"20","pricing_unit_id":"cny_mtoken",
+                "model_id":"qa-new-without-entity","billing_metric":"input","billing_item":"input","amount":"20","pricing_unit_id":"cny_mtoken",
                 "explicit_official":True,"source":"Synthetic fixture","source_ref":"Test!A1"}]}})
             request("imports/" + job["id"] + "/confirm", {
                 "expected_revision":job["revision"],"idempotency_key":"synthetic-" + job["id"]})
-            request("quotes", {"items":[{"model_id":"qa-new-without-entity","amount":"0.0031",
+            request("quotes", {"items":[{"model_id":"qa-new-without-entity","billing_metric":"input","amount":"0.0031",
                                         "pricing_unit_id":"cny_ktoken"}]})
             page.locator("#refreshButton").click()
             page.locator("#pricingConversionButton").click()
-            expect(page.locator("#quoteRows")).to_contain_text("前端反算倍率 0.16 × / 1.6 折（两位舍入）")
+            expect(page.locator("#quoteRows")).to_contain_text("按官网反算折扣 1.6折")
             # Display/export rounds only the multiplier; exact ratio and raw amount remain available.
             before_exports = quotes()
             for format in ("csv", "xlsx"):
@@ -136,13 +136,13 @@ def main():
                 columns = exported[0]
                 rows = [dict(zip(columns, row)) for row in exported[1:]]
                 calculated = next(row for row in rows if row["原价"] == "0.0031")
-                assert calculated["前端反算付款倍率（两位小数）"] == "0.16"
-                assert calculated["前端反算折扣（折，一位小数）"] == "1.6"
+                assert calculated["按官网反算折扣值（两位小数）"] == "0.16"
+                assert calculated["按官网反算折扣（折，一位小数）"] == "1.6"
                 assert calculated["反算倍率精确分子"] == "31" and calculated["反算倍率精确分母"] == "200"
                 assert str(calculated["反算倍率显示为近似"]).lower() == "true"
                 assert "HALF_UP" in calculated["反算倍率舍入规则"]
                 original = next(row for row in rows if row["模型 ID"] == "qa-high-precision")
-                assert original["原始付款倍率（两位小数）"] == "0.16"
+                assert original["原始存储折扣值（两位小数）"] == "0.16"
                 assert original["原价"] == "0.012345678901234567890"
             assert quotes() == before_exports
             request("quotes", {"items":[{"model_id":"qa-bulk-" + str(i)} for i in range(105)]})

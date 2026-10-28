@@ -9,12 +9,18 @@ PricingUnitId = Literal[
     "usd_ktoken", "usd_mtoken", "usd_second", "usd_image",
     "hkd_ktoken", "hkd_mtoken", "hkd_second", "hkd_image",
     "cny_ktoken", "cny_mtoken", "cny_second", "cny_image",
+    "usd_mtoken_hour", "usd_request", "usd_account_month",
+    "hkd_mtoken_hour", "hkd_request", "hkd_account_month",
+    "cny_mtoken_hour", "cny_request", "cny_account_month",
 ]
 
 _UNIT_ALIASES = {
     "token": "token", "tokens": "token", "个token": "token", "令牌": "token",
     "second": "second", "seconds": "second", "s": "second", "sec": "second", "秒": "second",
     "image": "image", "images": "image", "张": "image",
+    "request": "request", "requests": "request", "次": "request",
+    "token_hour": "token_hour", "token-hours": "token_hour",
+    "account_month": "account_month", "account-month": "account_month",
 }
 
 
@@ -43,14 +49,18 @@ def _build() -> tuple[PricingUnit, ...]:
         ("mtoken", "token", Decimal("1000000"), "token", "1M tokens", "mtoken"),
         ("second", "second", Decimal("1"), "time", "second", "s"),
         ("image", "image", Decimal("1"), "image", "image", "张"),
+        ("mtoken_hour", "token_hour", Decimal("1000000"), "token_time", "1M token-hours", "mtoken·h"),
+        ("request", "request", Decimal("1"), "request", "request", "request"),
+        ("account_month", "account_month", Decimal("1"), "subscription", "account-month", "account·month"),
     )
     symbols = {"USD": "$", "HKD": "HK$", "CNY": "¥"}
+    ordered = [(currency, base) for group in (bases[:4], bases[4:])
+               for currency in ("USD", "HKD", "CNY") for base in group]
     return tuple(PricingUnit(
         id=f"{currency.casefold()}_{scale}", currency=currency, unit=unit,
         unit_quantity=quantity, dimension=dimension, scale=scale,
         label=f"{currency} / {label}", symbol=f"{symbols[currency]} / {suffix}",
-    ) for currency in ("USD", "HKD", "CNY")
-      for scale, unit, quantity, dimension, label, suffix in bases)
+    ) for currency, (scale, unit, quantity, dimension, label, suffix) in ordered)
 
 
 PRICING_UNITS = _build()
@@ -61,7 +71,7 @@ PRICING_UNIT_BY_FIELDS = {
 
 
 def pricing_units_payload() -> dict[str, Any]:
-    return {"version": "1", "items": [value.as_dict() for value in PRICING_UNITS]}
+    return {"version": "2", "items": [value.as_dict() for value in PRICING_UNITS]}
 
 
 def canonical_legacy_unit(value: Any) -> str:
@@ -136,7 +146,7 @@ def expand_price_payload(value: dict[str, Any], *, allow_legacy: bool = False,
                       unit=definition.unit, unit_quantity=format(definition.unit_quantity, "f"))
         return result
     if not allow_legacy:
-        raise ValueError("currency/unit/unit_quantity do not identify one of the 12 pricing units")
+        raise ValueError("currency/unit/unit_quantity do not identify one of the 21 pricing units")
     result["legacy_unit"] = {key: result[key] for key in ("currency", "unit", "unit_quantity")}
     return result
 

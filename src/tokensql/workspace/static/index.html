@@ -61,7 +61,7 @@
             <table class="data-table">
               <thead><tr>
                 <th class="check-cell"><input id="selectAll" type="checkbox" aria-label="选择当前页全部报价"></th>
-                <th>模型 / 唯一 ID</th><th>模型商</th><th>供应商 / 标签 / 渠道 ID</th><th>计费项</th><th class="number-cell">官网价 / 单位</th><th class="number-cell">供应商价 / 单位</th><th class="number-cell">付款倍率 / 折扣</th><th>来源</th><th class="action-cell">操作</th>
+                <th>模型 / 唯一 ID</th><th>模型商</th><th>供应商 / 标签 / 渠道 ID</th><th>计费项</th><th class="number-cell">官网价 / 单位</th><th class="number-cell">供应商价 / 单位</th><th class="number-cell">折扣 / 折后价</th><th>来源</th><th class="action-cell">操作</th>
               </tr></thead>
               <tbody id="quoteRows"></tbody>
             </table>
@@ -139,11 +139,12 @@
         <label>币种<select name="currency" aria-label="原始币种"><option value="CNY">人民币 CNY（默认）</option><option value="USD">美元 USD</option><option value="HKD">港币 HKD</option><option value="">未提供 / 不明确</option></select></label>
         <label>计价单位<select name="pricing_unit_id" aria-label="计价单位"></select><small>币种默认人民币；计价尺度不默认，缺失时可留空。</small></label>
         <label data-money-field>原币供应商金额<input name="amount" inputmode="decimal"></label>
-        <label data-discount-field>折扣（折，8.0 = 八折，12.0 = 溢价）<input name="discount_rate" inputmode="decimal" placeholder="例如 8.0"><small>折数输入一位小数；付款倍率按 HALF_UP 保留两位小数入库，例如 8.0折 → 0.80。金额精度不变。</small></label>
-        <div class="wide computed-card" id="quotePreview" aria-live="polite">金额与付款倍率都是独立原始输入，可同时提供或留空。计算仅用于前端预览，不反填保存。</div>
+        <label data-discount-field>源折扣（折，8.0 = 八折，12.0 = 溢价）<input name="discount_rate" inputmode="decimal" placeholder="例如 8.0"><small>以折为单位，保留一位小数，例如八折填写 8.0。</small></label>
+        <div class="wide" id="quoteConditionsEditor"></div>
+        <div class="wide computed-card" id="quotePreview" aria-live="polite">源金额与源折扣可独立填写；展开适用范围后可分别计算官网计费项。</div>
         <label>来源<input name="source"></label>
         <label>单元格 / 来源依据<input name="source_ref"></label>
-        <label class="wide">条件（JSON）<textarea name="conditions" rows="2">{}</textarea></label>
+        <label class="wide">来源原文条件（JSON）<textarea name="conditions" rows="2">{}</textarea></label>
         <label class="wide">备注<textarea name="note" rows="2"></textarea></label>
       </div>
       <p class="form-error" id="formError" role="alert"></p>
@@ -182,7 +183,7 @@
   </dialog>
 
   <dialog class="editor-dialog conversion-dialog" id="currencyConversionDialog">
-    <header><div><p class="eyebrow">DISPLAY CURRENCY</p><h2>统一显示币种</h2><p>只改变浏览器中的显示与转换导出，不修改原价、计价单位、原始付款倍率、审核上下文或记忆。</p></div><button id="closeCurrencyConversionButton" class="icon-button" type="button" aria-label="关闭币种换算">×</button></header>
+    <header><div><p class="eyebrow">DISPLAY CURRENCY</p><h2>统一显示币种</h2><p>只改变浏览器中的显示与转换导出，不修改原价、计价单位、源折扣、审核上下文或记忆。</p></div><button id="closeCurrencyConversionButton" class="icon-button" type="button" aria-label="关闭币种换算">×</button></header>
     <div class="review-content">
       <div class="conversion-options" id="currencyConversionOptions" role="group" aria-label="目标显示币种"></div>
       <details class="conversion-help"><summary>？ 汇率从哪里来</summary><p id="currencyConversionHelp">仅使用 pricing-context 中带来源的版本化汇率。缺少来源或目标汇率时，该行明确保留原价并标注无法换算。</p></details>
@@ -190,7 +191,7 @@
   </dialog>
 
   <dialog class="editor-dialog conversion-dialog" id="unitConversionDialog">
-    <header><div><p class="eyebrow">DISPLAY UNIT</p><h2>统一显示单位</h2><p>同 token 量纲直接精确换算；秒 / 张跨量纲必须有模型参数或本次临时倍率。原始付款倍率始终保留；启用折扣计算后，另行显示基于官网价计算的倍率。</p></div><button id="closeUnitConversionButton" class="icon-button" type="button" aria-label="关闭单位换算">×</button></header>
+    <header><div><p class="eyebrow">DISPLAY UNIT</p><h2>统一显示单位</h2><p>同 token 量纲直接精确换算；秒 / 张跨量纲必须有模型参数或本次临时倍率。源折扣始终保留；启用折扣计算后，另行显示按官网反算的折扣。</p></div><button id="closeUnitConversionButton" class="icon-button" type="button" aria-label="关闭单位换算">×</button></header>
     <div class="review-content">
       <div class="conversion-options" id="unitConversionOptions" role="group" aria-label="目标显示单位"></div>
       <section class="factor-panel" id="factorPanel">
@@ -217,6 +218,7 @@
 
   <div class="toast-region" id="toastRegion" aria-live="polite"></div>
   <script src="/static/app.js" defer></script>
+  <script src="/static/conditions.js" defer></script>
   <script src="/static/review.js" defer></script>
   <script src="/static/context.js" defer></script>
   <script src="/static/conversion.js" defer></script>

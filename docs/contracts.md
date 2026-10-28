@@ -1,12 +1,12 @@
 # 本轮协作接口约定
 
-更新：2026-10-20。当前边界由主Agent统一同步；旧physical_key已移除。
+更新：2026-10-21。当前边界由主Agent统一同步；旧physical_key已移除。本轮新增条件定价、稳定官网ID、折扣范围与多项匹配响应详见[共同契约](pricing_conditions_contract.md)，冲突时以该契约为准。
 
 ## 数据
 
 - model_id是唯一必填业务标识和模型主键，移除physical_key及其唯一约束。model_name/vendor、billing_item、supplier、金额/原折扣及单位可null，aliases用于已证实的别名映射；容器null可规范为[]/{}。系统id/revision/审计仍保留。新增报价确认时在同事务自动创建缺失模型，不必先审核实体，不能按价格拆分模型ID。
-- 一个 model_id 下可有多个 billing_item（input/output/cache 等），官网价唯一键是 model_id+billing_item。
-- 数值为Decimal字符串，可空；discount_rate单独遵循ROUND_HALF_UP两位入库与响应（0.80/0.15/0.00），null保持，不允许负值先量化成0绕过校验。amount/官网价/FX不套两位精度。旧折扣规范化先备份、事务更新revision/updated_at与raw old/new审计，重复启动无额外写；不改旧审计/import回执。单位已知时使用固定12项pricing_unit_id并校验兼容字段冲突；未知ID不可瞎造，null ID允许。部分已知currency/unit/unit_quantity必须保留，Tokens不推断1K/1M。新增未提供币种且无完整单位ID时默认CNY；完整ID按字典决定币种，明确外币/显式null保留，Patch未提供币种不能覆盖旧值，旧库不批量回填。GET /pricing-units仍返回12项。
+- 一个 model_id 下可有多个 billing_item（input/output/cache 等），官网价以稳定official_price_id定位，允许同模型/计费项下多个结构化条件价；billing_item原文保留。
+- 数值为Decimal字符串，可空；discount_rate单独遵循ROUND_HALF_UP两位入库与响应（0.80/0.15/0.00），null保持，不允许负值先量化成0绕过校验。amount/官网价/FX不套两位精度。旧折扣规范化先备份、事务更新revision/updated_at与raw old/new审计，重复启动无额外写；不改旧审计/import回执。单位已知时使用21项pricing_unit_id（保留原12项，增加三币种的mtoken_hour/request/account_month）并校验兼容字段冲突；未知ID不可瞎造，null ID允许。部分已知currency/unit/unit_quantity必须保留，Tokens不推断1K/1M。新增未提供币种且无完整单位ID时默认CNY；完整ID按字典决定币种，明确外币/显式null保留，Patch未提供币种不能覆盖旧值，旧库不批量回填。GET /pricing-units返回version=2、21项；新量纲不得伪换为token。
 - amount和discount_rate均为原始独立字段，可同时提供、仅折扣或均空，不通过官网价在后台补齐/覆盖或一致性拦截。response.discount_rate保持规范化后的两位原付款比例，raw_discount_rate为兼容副本；derived_amount/converted_supplier_amount不再由后台计算，normalized为空兼容对象。官网原始记录可随official_price提供。
 - bundle仍为models/official_prices/create/update/delete；update/delete保留id/expected_revision。模型/报价/官网记录只要求非空model_id；没有catalog时允许仅ID stub。QuotePatch显式null可清字段，不应复填旧单位。官网检索意图额外检查真实URL等来源证据与范围，普通缺项草案不因缺证据字段阻断。
 - store 暴露 preview_bundle(bundle)（不写正式库）、apply_bundle(bundle, actor, import_id)（整批事务/幂等）、catalog_snapshot()；具体 Pydantic schema 由数据 Agent 首先落地并通知其它 Agent。

@@ -26,7 +26,8 @@ def validate_lookup_bundle(job: dict[str, Any], bundle: dict[str, Any],
     for item in bundle.get("official_prices", []):
         if not isinstance(item, dict) or item.get("model_id") != target:
             raise ValueError("official lookup price must match the requested model_id")
-        if billing and item.get("billing_item") != billing:
+        if billing and (not isinstance(item.get("billing_item"), str)
+                        or item["billing_item"].casefold() != billing.casefold()):
             raise ValueError("official lookup price is outside the requested billing item")
         if item.get("amount") is None:
             continue

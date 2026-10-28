@@ -3,7 +3,9 @@ description: TokenSQL remote development and reviewed OpenCode pricing maintenan
 alwaysApply: true
 ---
 
-Follow current plan.md and AGENTS.md. Only tokensql.workspace is supported.
+Follow plan.md, AGENTS.md and docs/pricing_conditions_contract.md.
+Official stable IDs, typed conditions and explicit discount scopes preserve raw data;
+unknown is not all. Show zhe once; expand multi-item official prices without writes.
 All project operations run remotely through ssh uni; never create local project
 copies or write C-drive files. Never read handoff/private handoff or cleanup
 backup business files. Do not alter shared inference or coding services.
@@ -13,7 +15,8 @@ is removed. Quotes create missing models atomically, without a separate model
 approval. Other business fields may be null. New omitted currency defaults to
 CNY; explicit foreign currencies and null remain intact. Never guess token
 scale, supplier or prices to pass schema.
-When known, units use the fixed 12-item dictionary; keep partial unit evidence.
+Units preserve the original 12 IDs and add mtoken_hour/request/account_month
+for three currencies (21 total); never treat these as token equivalents.
 Preserve raw amounts and raw multipliers independently, including discount-only
 records. Discount ratios are HALF_UP rounded to two decimal places in storage,
 UI-derived results and exports (0.80 = 8 zhe, 0.15 = 1.5 zhe). Use deterministic
@@ -41,6 +44,6 @@ the official-source index, fetches primary evidence, then human-reviewed writes.
 Confirmed corrections alone may become scoped memory outside the repository.
 
 Root coordinates and independently verifies; coding/review Subagents use the
-user-requested inherited gpt-6.1-sol ultra. Preserve unrelated changes.
+explicitly selected gpt-6.1-sol ultra; root uses Astra. Preserve unrelated changes.
 Record actual evidence in progress.md; distinguish unit tests, API stubs,
 real browser, real model and real business-file validation.

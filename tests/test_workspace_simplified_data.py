@@ -78,12 +78,20 @@ def test_nullable_predecessor_migration_preserves_history_and_unrelated_constrai
     try:
         for name, rows in preserved.items():
             query = f"SELECT * FROM {name}" + (" WHERE id<=12" if name == "pricing_audit" else "")
-            assert [tuple(row) for row in store._conn.execute(query)] == rows
+            if name == "pricing_official":
+                current = store._conn.execute(query).fetchone()
+                previous = rows[0]
+                assert current["model_id"] == previous[0] and current["billing_item"] == previous[1]
+                assert current["revision"] == previous[3] + 1
+                assert all(json.loads(current["payload"])[key] == value
+                           for key, value in json.loads(previous[2]).items())
+            else:
+                assert [tuple(row) for row in store._conn.execute(query)] == rows
         assert store._conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert store._conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
         assert store.get_quote(7).currency is None
         assert store.get_quote(7).discount_rate == Decimal("0.12")
-        assert store.get_quote(7).revision == 4
+        assert store.get_quote(7).revision == 5
         migrated = store._conn.execute("SELECT old_value,new_value FROM pricing_audit WHERE actor=\'migration:discount-2dp\'").fetchone()
         assert json.loads(migrated["old_value"])["discount_rate"] == "0.123456789"
         assert json.loads(migrated["new_value"])["discount_rate"] == "0.12"
@@ -99,7 +107,7 @@ def test_nullable_predecessor_migration_preserves_history_and_unrelated_constrai
         assert store._conn.execute("SELECT revision FROM pricing_model WHERE model_id=\'old-model\'").fetchone()[0] == 4
         created = store.apply_bundle({"create": [{"model_id": "id-only"}]})["items"][0]
         assert created["id"] == 1000 and created["currency"] == "CNY"
-        old = store.update_quote(7, {"note": "metadata only"}, expected_revision=4)
+        old = store.update_quote(7, {"note": "metadata only"}, expected_revision=5)
         assert old.currency is None and old.discount_rate == Decimal("0.12")
     finally:
         store.close()

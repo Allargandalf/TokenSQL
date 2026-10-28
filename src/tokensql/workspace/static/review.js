@@ -390,7 +390,7 @@
   const fieldLabels = { model_id: "唯一模型 ID", vendor: "模型商", model_name: "模型名称", aliases: "别名（逗号分隔）",
     billing_item: "计费项", amount: "原币金额", currency: "币种（新增默认人民币）", pricing_unit_id: "计价单位",
     explicit_official: "文件 / 来源明确标注官网价", source: "来源", source_ref: "单元格 / 来源依据", supplier: "供应商",
-    tags: "标签（逗号分隔）", supplier_model_id: "原渠道 ID", discount_rate: "折扣（折，8.0 = 八折）", id: "报价 ID", expected_revision: "原版本" };
+    tags: "标签（逗号分隔）", supplier_model_id: "原渠道 ID", discount_rate: "源折扣（折，8.0 = 八折）", id: "报价 ID", expected_revision: "原版本" };
 
   function markDirty() {
     reviewDirty = true;
@@ -443,7 +443,7 @@
           else input.value = key === "discount_rate" ? window.TokenSQLConversion.discountFold(data[key]) ?? "" : Array.isArray(data[key]) ? data[key].join(", ") : data[key] ?? "";
           if (key === "discount_rate") {
             input.dataset.originalRatio = window.TokenSQLConversion.discountRatio(data[key]) ?? ""; input.dataset.initialFold = input.value;
-            input.title = data[key] == null ? "折数四舍五入保留一位小数。" : "付款倍率：" + window.TokenSQLConversion.discountRatio(data[key]) + " ×；按 HALF_UP 保留两位小数入库。";
+            input.title = "以折为单位，保留一位小数，例如八折填写8.0。";
           }
           if (section === "delete" || (entry.expected_revision && key === "model_id")) input.readOnly = true;
           input.addEventListener("input", () => {
@@ -476,7 +476,23 @@
           });
           grid.append(node("label", {}, [node("span", { text: fieldLabels[key] }), input]));
         });
-        card.append(grid); block.append(card);
+        card.append(grid);
+        if (["official_prices", "create", "update"].includes(section)) {
+          card.append(window.TokenSQLConditions.createEditor(data, { quote: section !== "official_prices", label: label + " " + (index + 1), onChange: markDirty }));
+          for (const key of ["conditions", "note"]) {
+            const input = node("textarea"); input.rows = 2;
+            input.setAttribute("aria-label", label + " " + (index + 1) + (key === "conditions" ? " 来源原文条件 JSON" : " 备注"));
+            input.value = key === "conditions" ? JSON.stringify(data[key] || {}, null, 2) : data[key] || "";
+            input.addEventListener("input", () => {
+              try { const value = key === "conditions" ? JSON.parse(input.value || "{}") : input.value || null;
+                if (key === "conditions" && (!value || Array.isArray(value) || typeof value !== "object")) throw Error("来源原文条件必须是对象");
+                data[key] = value; input.setCustomValidity(""); markDirty(); }
+              catch (error) { input.setCustomValidity(error.message); }
+            });
+            card.append(node("details", {}, [node("summary", { text: key === "conditions" ? "来源原文条件" : "备注" }), input]));
+          }
+        }
+        block.append(card);
       });
       target.append(block);
     }
@@ -490,9 +506,7 @@
     target.append(node("p", { text: `新增 ${changes.added ?? (reviewBundle.create || []).length} · 更新 ${changes.updated ?? (reviewBundle.update || []).length} · 删除 ${changes.deleted ?? (reviewBundle.delete || []).length}` }));
     const items = preview.items || preview.create || [];
     items.forEach((item) => {
-      const official = preview.catalog?.official_prices?.find((price) =>
-        price.model_id === item.model_id && (price.billing_item ?? null) === (item.billing_item ?? null));
-      const displayed = official ? { ...item, official_price: official } : item;
+      const displayed = { ...item, _officialCatalog: preview.catalog?.official_prices || state.catalog.official_prices };
       target.append(node("div", { className: "review-computed-item" }, [node("strong", { text: `${item.model_id} / ${item.billing_item ?? "未提供计费项"} / ${item.supplier ?? "未提供供应商"}` }), priceDisplay(displayed), pricingDisplay(displayed)]));
     });
     if (!items.length && Object.keys(preview).length) {
@@ -531,7 +545,7 @@
 
   async function saveReview() {
     if (!currentJob || !readyStatuses.has(currentJob.status) || reviewBusy) return false;
-    for (const input of $("reviewSections").querySelectorAll("input,select")) { if (!input.reportValidity()) return false; }
+    for (const input of $("reviewSections").querySelectorAll("input,select,textarea")) { if (!input.reportValidity()) return false; }
     reviewBusy = true; $("previewReviewButton").disabled = true; $("confirmReviewButton").disabled = true;
     try {
       const bundle = parseBundle($("reviewBundle").value);
@@ -608,7 +622,7 @@
       const job = await api("/imports/drafts", { method: "POST", body: JSON.stringify({ bundle: {}, prompt: "人工修订模型目录与官网价格" }) });
       await openReview(job); showJob(job);
       const allowed = section === "models" ? ["model_id", "vendor", "model_name", "aliases", "source", "source_ref", "note"] : [
-        "model_id", "billing_item", "amount", "currency", "unit", "unit_quantity", "pricing_unit_id", "explicit_official", "source", "source_ref", "conversion", "effective_date", "note",
+        "model_id", "official_price_id", "billing_item", "billing_metric", "pricing_conditions", "conditions", "amount", "currency", "unit", "unit_quantity", "pricing_unit_id", "explicit_official", "source", "source_ref", "conversion", "effective_date", "note",
       ];
       let entry = section === "models" ? { model_id: "", vendor: "", model_name: "", aliases: [] } :
         { model_id: "", billing_item: null, amount: null, currency: "CNY", pricing_unit_id: null, explicit_official: null, source: null, source_ref: null };
@@ -636,7 +650,8 @@
           const button = node("button", { className: "text-button", type: "button", text: "编辑官网计费项" });
           button.addEventListener("click", () => manualDraft("official_prices", price));
           block.append(node("div", { className: "catalog-price" }, [
-            node("span", { text: `${price.billing_item ?? "未提供计费项"} · ${price.currency ?? ""} ${price.amount ?? "未提供金额"}` }), priceDisplay(price),
+            node("span", { text: window.TokenSQLConditions.priceLabel(price) }), priceDisplay(price),
+            node("small", { text: "版本 " + price.revision }),
             node("small", { text: `${price.source ?? ""} · ${price.source_ref ?? ""}` }), button,
           ]));
         }

@@ -31,16 +31,19 @@ def store(tmp_path):
 
 def test_dictionary_is_exact_closed_product_and_api(tmp_path):
     expected_ids = [f"{currency}_{scale}" for currency in ("usd", "hkd", "cny")
-                    for scale in ("ktoken", "mtoken", "second", "image")]
+                    for scale in ("ktoken", "mtoken", "second", "image")] + [
+            f"{currency}_{scale}" for currency in ("usd", "hkd", "cny")
+            for scale in ("mtoken_hour", "request", "account_month")]
     payload = pricing_units_payload()
-    assert payload["version"] == "1"
+    assert payload["version"] == "2"
     assert [item["id"] for item in payload["items"]] == expected_ids
-    assert len(PRICING_UNITS) == 12
+    assert len(PRICING_UNITS) == 21
     assert {(item["currency"], item["unit"], item["unit_quantity"])
             for item in payload["items"]} == {
         (currency, unit, quantity) for currency in ("USD", "HKD", "CNY")
         for unit, quantity in (("token", "1000"), ("token", "1000000"),
-                               ("second", "1"), ("image", "1"))}
+                               ("second", "1"), ("image", "1"), ("token_hour", "1000000"),
+                               ("request", "1"), ("account_month", "1"))}
     local = WorkspaceStore(tmp_path / "api.sqlite")
     app = FastAPI()
     app.include_router(create_data_router(local))
@@ -64,8 +67,8 @@ def test_id_is_unique_truth_and_legacy_split_fields_are_strict():
     assert id_only.currency == "USD" and id_only.unit_quantity == Decimal("1000000")
     with pytest.raises(ValidationError, match="conflicts"):
         QuoteCreate.model_validate({**quote(), "pricing_unit_id": "usd_ktoken", "currency": "HKD"})
-    with pytest.raises(ValidationError, match="12 pricing units"):
-        QuoteCreate.model_validate(quote(unit="request", unit_quantity="1"))
+    with pytest.raises(ValidationError, match="21 pricing units"):
+        QuoteCreate.model_validate(quote(unit="unsupported_legacy_request", unit_quantity="1"))
     with pytest.raises(ValidationError):
         QuoteCreate.model_validate({**quote(), "pricing_unit_id": "eur_ktoken"})
 
@@ -134,17 +137,17 @@ def test_unknown_old_unit_is_preserved_with_issue_and_not_guessed(store):
     raw = json.loads(store._conn.execute("SELECT payload FROM pricing_quote WHERE id=?",
                                         (created["id"],)).fetchone()[0])
     raw.pop("pricing_unit_id")
-    raw.update(currency="CNY", unit="request", unit_quantity="1")
+    raw.update(currency="CNY", unit="unsupported_legacy_request", unit_quantity="1")
     store._conn.execute("UPDATE pricing_quote SET payload=? WHERE id=?",
                         (json.dumps(raw), created["id"]))
     legacy = store.get_quote(created["id"])
     assert legacy.pricing_unit_id is None
-    assert legacy.legacy_unit == {"currency": "CNY", "unit": "request", "unit_quantity": "1"}
+    assert legacy.legacy_unit == {"currency": "CNY", "unit": "unsupported_legacy_request", "unit_quantity": "1"}
     assert legacy.converted_supplier_amount is None and legacy.discount_rate is None
     assert "unknown_legacy_pricing_unit" in {entry["code"] for entry in legacy.issues}
     preserved = json.loads(store._conn.execute("SELECT payload FROM pricing_quote WHERE id=?",
                                               (created["id"],)).fetchone()[0])
-    assert preserved["unit"] == "request" and "pricing_unit_id" not in preserved
+    assert preserved["unit"] == "unsupported_legacy_request" and "pricing_unit_id" not in preserved
     preview = store.preview_bundle({"create": [quote(supplier="Another supplier")]})
     assert preview["changes"]["added"] == 1
     assert store.list_quotes()[1] == 1
@@ -184,17 +187,17 @@ def test_unknown_old_official_unit_survives_preview_clone(store):
         ("maker/model-a", "input")).fetchone()
     raw = json.loads(row["payload"])
     raw.pop("pricing_unit_id")
-    raw.update(currency="CNY", unit="request", unit_quantity="1")
+    raw.update(currency="CNY", unit="unsupported_legacy_request", unit_quantity="1")
     store._conn.execute(
         "UPDATE pricing_official SET payload=? WHERE model_id=? AND billing_item=?",
         (json.dumps(raw), "maker/model-a", "input"))
     snapshot = store.catalog_snapshot()
     price = snapshot["official_prices"][0]
-    assert price["pricing_unit_id"] is None and price["unit"] == "request"
-    assert price["legacy_unit"]["unit"] == "request" and "normalized" not in price
+    assert price["pricing_unit_id"] is None and price["unit"] == "unsupported_legacy_request"
+    assert price["legacy_unit"]["unit"] == "unsupported_legacy_request" and "normalized" not in price
     preview = store.preview_bundle({"create": [quote()]})
     assert preview["items"][0]["discount_rate"] is None
-    assert preview["items"][0]["official_price"]["legacy_unit"]["unit"] == "request"
+    assert preview["items"][0]["official_price"]["legacy_unit"]["unit"] == "unsupported_legacy_request"
 
 
 def test_view_export_is_memory_only_formula_safe_and_real_xlsx(store):

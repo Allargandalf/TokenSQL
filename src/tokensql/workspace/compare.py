@@ -19,6 +19,8 @@ import unicodedata
 from typing import Any
 
 from .pricing import identity_key
+from .pricing_conditions import (DiscountItem, compact_conditions, legacy_official_semantics,
+                                 legacy_quote_scope, scenario_key)
 from .units import expand_price_payload
 
 
@@ -32,9 +34,9 @@ def label(value: Any) -> str:
 
 
 def billing(value: Any) -> str:
-    token = normalize(value)
-    return {"inputtokens": "input", "outputtokens": "output", "cachedinput": "cache",
-            "cachedinputtokens": "cache", "cachetokens": "cache"}.get(token, token)
+    known, _ = legacy_official_semantics(value if isinstance(value, str) else None)
+    # Unrecognized labels are quoted business literals, not fuzzy model aliases.
+    return known if known is not None else " ".join(str(value or "").split()).casefold()
 
 
 def unit(value: Any) -> str:
@@ -189,20 +191,97 @@ def _compare_snapshots(baseline: dict, actual: dict, *, identity_map: dict[str, 
             report["missing"].append({"kind": "model", "model_id": identifier})
     report["identity"] = mapping
 
+    def structured(row: dict, kind: str = "official_prices") -> dict:
+        # Reuse only the backend's complete, documented legacy literals. Currency,
+        # notes and arbitrary long labels never become inferred pricing conditions.
+        inferred_metric, inferred_conditions = legacy_official_semantics(row.get("billing_item"))
+        metric = row.get("billing_metric")
+        if metric is not None and not isinstance(metric, str):
+            raise ValueError("billing_metric must be a string or null")
+        conditions = compact_conditions(row.get("pricing_conditions"))
+        raw = row.get("conditions")
+        if raw is not None and not isinstance(raw, dict):
+            raise ValueError("original conditions must be an object or null")
+        if kind == "official_prices":
+            if any(key in conditions and conditions[key] != value
+                   for key, value in inferred_conditions.items()):
+                raise ValueError("explicit pricing_conditions conflict with the original billing_item")
+            # Match the backend's bounded literal adapter: a 5m cache label supplies
+            # TTL while an explicit typed market supplies a separate known condition.
+            conditions = {**inferred_conditions, **conditions}
+            if "pricing_conditions" not in row and raw:
+                conditions["raw"] = raw
+        return {**row, "billing_metric": metric if metric is not None else inferred_metric,
+                "pricing_conditions": conditions or inferred_conditions, "conditions": raw or {}}
+
+    def literal(value: Any) -> str:
+        return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)
+
+    official_by_id = {"baseline": defaultdict(list), "actual": defaultdict(list)}
+    for side, snapshot in (("baseline", baseline), ("actual", actual)):
+        for row in snapshot.get("official_prices", []):
+            identifier = row.get("official_price_id")
+            if identifier is not None:
+                if not isinstance(identifier, str) or not identifier.strip():
+                    issues.append({"code": "invalid_official_price_id", "side": side})
+                    continue
+                official_by_id[side][identifier].append(row)
+        for identifier, rows in official_by_id[side].items():
+            if len(rows) != 1:
+                issues.append({"code": "duplicate_official_price_id", "side": side,
+                               "official_price_id": identifier, "count": len(rows)})
+
+    def official_scenario(row: dict, side: str) -> tuple:
+        identifier = row.get("model_id")
+        target = identifier if side == "baseline" else mapping.get(identifier)
+        return target, scenario_key(structured(row))
+
+    def discount_selectors(row: dict, side: str) -> tuple:
+        selectors = row.get("discount_items") or []
+        if not isinstance(selectors, list):
+            raise ValueError("discount_items must be an array")
+        result = []
+        for raw_selector in selectors:
+            selector = DiscountItem.model_validate(raw_selector).model_dump(mode="json", exclude_none=True)
+            selector["pricing_conditions"] = compact_conditions(selector.get("pricing_conditions"))
+            for field in ("billing_metric", "billing_item"):
+                if selector.get(field) is not None:
+                    selector[field] = selector[field].casefold()
+            identifier = selector.pop("official_price_id", None)
+            if identifier is not None:
+                referenced = official_by_id[side].get(identifier, [])
+                if len(referenced) != 1 or referenced[0].get("model_id") != row.get("model_id"):
+                    issues.append({"code": "invalid_discount_item_reference", "side": side,
+                                   "model_id": row.get("model_id"), "official_price_id": identifier})
+                    selector["invalid_official_price_id"] = identifier
+                else:
+                    # Opaque IDs are local storage identities. Compare their referenced
+                    # model/scenario meaning, never the ID strings across databases.
+                    selector["official_scenario"] = official_scenario(referenced[0], side)
+            result.append(literal(selector))
+        return tuple(sorted(result))
+
     def key_for(row: dict, kind: str, side: str):
         original_id = row.get("model_id")
         target = original_id if side == "baseline" else mapping.get(original_id)
         if target not in gold:
             issues.append({"code": "orphan_price_model", "side": side, "kind": kind, "model_id": original_id})
             return None
+        item = structured(row, kind)
         billing_item = billing(row.get("billing_item") or row.get("metric"))
-        base = (target, billing_item, label(row.get("effective_date")))
+        metric = item.get("billing_metric")
+        base = (target, billing_item, metric.casefold() if metric is not None else "",
+                literal(item["pricing_conditions"]), label(row.get("effective_date")),
+                literal(item["conditions"]))
         if kind == "quotes":
             base += (label(row.get("dimension")) or unit(row.get("unit")), label(row.get("direction")) or billing_item)
         if kind == "quotes":
             tags = tuple(sorted(str(tag) for tag in (row.get("tags") or [])))
+            scope = row.get("discount_scope", legacy_quote_scope(row))
+            if scope not in {"unknown", "model", "items"}:
+                raise ValueError("invalid discount_scope")
             base += (label(row.get("supplier") or row.get("provider")), tags, str(row.get("supplier_model_id") or ""),
-                     json.dumps(row.get("conditions") or {}, sort_keys=True, ensure_ascii=False))
+                     scope, discount_selectors(row, side))
         return base
 
     def measure(row: dict):
@@ -225,7 +304,7 @@ def _compare_snapshots(baseline: dict, actual: dict, *, identity_map: dict[str, 
         if any(row.get(field) is None for field in ("currency", "unit", "unit_quantity")):
             return
         value, currency, dimension = measure(row)
-        if value is None or currency not in rates:
+        if value is None or currency not in rates or dimension not in {"second", "image"}:
             return
         matching = [factor for factor in factors if factor.get("model_id") in {model_id, row.get("model_id")} and
                     billing(factor.get("billing_item")) == billing(row.get("billing_item")) and unit(factor.get("unit")) == dimension]
@@ -241,16 +320,22 @@ def _compare_snapshots(baseline: dict, actual: dict, *, identity_map: dict[str, 
             for row in snapshot.get(kind, []):
                 if kind == "quotes" and row.get("status", "active") != "active":
                     continue
-                key = key_for(row, kind, side)
+                try:
+                    key = key_for(row, kind, side)
+                except (ValueError, TypeError) as error:
+                    issues.append({"code": "invalid_pricing_structure", "side": side, "kind": kind,
+                                   "model_id": row.get("model_id"), "message": str(error)})
+                    continue
                 if key is not None:
                     groups[side][key].append(row)
-                    if unit(row.get("unit")) != "token":
+                    if unit(row.get("unit")) in {"second", "image"}:
                         try: estimate(row, side, key[0])
                         except (InvalidOperation, ValueError, TypeError): pass
             if kind == "official_prices":
                 unique_counts = defaultdict(int)
-                for key, rows in groups[side].items():
-                    unique_counts[key[:2]] += len(rows)
+                for rows in groups[side].values():
+                    for row in rows:
+                        unique_counts[official_scenario(row, side)] += 1
                 for key, count in unique_counts.items():
                     if count > 1:
                         issues.append({"code": "duplicate_price_key", "side": side, "kind": kind, "key": list(key), "count": count})

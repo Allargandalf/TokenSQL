@@ -161,6 +161,9 @@ class Fixture:
             self.context["revision"] += 1
             self.context["fx_rates"][0]["source"] = "ECB synthetic fixture"
             respond(self.context)
+        elif path == "/catalog/preview":
+            self.preview_requests.append(data)
+            respond({"items": [self.compute({**entry["changes"], "id": entry["id"]}) for entry in data["update"]], "issues": []})
         elif path == "/quotes/preview":
             self.preview_requests.append(data)
             respond({"items": [self.compute(item) for item in data["items"]], "issues": []})
@@ -193,7 +196,7 @@ class Fixture:
         elif path == "/exports/view":
             self.view_exports.append(data)
             columns, rows = data["columns"], data["rows"]
-            safe = lambda value: "'" + value if isinstance(value, str) and value.startswith(("=", "+", "-", "@")) else value
+            safe = lambda value: json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else "'" + value if isinstance(value, str) and value.startswith(("=", "+", "-", "@")) else value
             if data["format"] == "xlsx":
                 workbook = Workbook(); sheet = workbook.active
                 sheet.append([column["label"] for column in columns])
@@ -380,17 +383,17 @@ def main():
         page.locator('[name=supplier]').fill("Manual Supplier")
         page.locator('[name=discount_rate]').fill("8.0")
         page.locator('[name=pricing_unit_id]').select_option("cny_ktoken")
-        expect(page.locator("#quotePreview")).to_contain_text("16 CNY")
+        expect(page.locator("#quotePreview")).to_contain_text("折后价 CNY 16")
         page.locator('[name=supplier]').press("Enter")
         assert len(fixture.quotes) == 1
         page.locator("#saveQuoteButton").click()
         expect(page.locator("#quoteRows tr")).to_have_count(2)
         page.locator("#quoteRows tr").last.get_by_role("button", name="编辑报价 smoke-a").click()
         page.locator('[name=amount]').fill("0.012")
-        expect(page.locator("#quotePreview")).to_contain_text("前端反算付款倍率：0.60 × / 6.0 折")
+        expect(page.locator("#quotePreview")).to_contain_text("按官网反算折扣 6.0折")
         page.locator("#saveQuoteButton").click()
-        expect(page.locator("#quoteRows tr").last).to_contain_text("原始付款倍率 0.80 × / 8.0 折")
-        assert fixture.preview_requests == []
+        expect(page.locator("#quoteRows tr").last).to_contain_text("源折扣 8.0折")
+        assert fixture.preview_requests and all("items" in payload or "update" in payload for payload in fixture.preview_requests)
         assert fixture.quotes[-1]["amount"] == "0.012" and fixture.quotes[-1]["discount_rate"] == "0.80"
         assert fixture.quotes[-1]["pricing_unit_id"] == "cny_ktoken"
 
@@ -404,10 +407,11 @@ def main():
         page.locator("#exportFormat").select_option("xlsx")
         with page.expect_download():
             page.locator("#quoteRows tr").first.get_by_role("button", name="导出此模型 smoke-a").click()
-        assert fixture.exports[0]["format"] == ["csv"]
-        assert "ids" in fixture.exports[1]
-        assert fixture.exports[2]["model_id"] == ["smoke-a"]
-        assert fixture.exports[2]["format"] == ["xlsx"]
+        assert fixture.view_exports[0]["format"] == "csv"
+        assert len(fixture.view_exports[0]["rows"]) == 2
+        assert {row["quote_id"] for row in fixture.view_exports[1]["rows"]} == {item["id"] for item in fixture.quotes}
+        assert {row["model_id"] for row in fixture.view_exports[2]["rows"]} == {"smoke-a"}
+        assert fixture.view_exports[2]["format"] == "xlsx"
         page.on("dialog", lambda dialog: dialog.accept())
         page.locator("#quoteRows tr").last.get_by_role("button", name="删除报价 smoke-a").click()
         expect(page.locator("#quoteRows tr")).to_have_count(1)
@@ -445,7 +449,7 @@ def main():
         expect(page.locator("#reviewDialog")).to_be_visible(timeout=15000)
         page.get_by_role("textbox", name="新增供应商报价 1 原币金额", exact=True).fill("12")
         page.locator("#previewReviewButton").click()
-        expect(page.locator("#reviewPreview")).to_contain_text("前端反算倍率 0.60 × / 6.0 折")
+        expect(page.locator("#reviewPreview")).to_contain_text("按官网反算折扣 6.0折")
         assert fixture.jobs["review-2"]["revision"] == 2
         assert len(fixture.quotes) == 1
         if args.evidence_dir:
@@ -453,7 +457,7 @@ def main():
             page.screenshot(path=str(args.evidence_dir / "workspace-review-desktop.png"), full_page=True)
         page.locator("#confirmReviewButton").click()
         expect(page.locator("#reviewIssues")).to_contain_text("已重新加载最新计算预览")
-        expect(page.locator("#reviewPreview")).to_contain_text("前端反算倍率 0.48 × / 4.8 折")
+        expect(page.locator("#reviewPreview")).to_contain_text("按官网反算折扣 4.8折")
         assert fixture.jobs["review-2"]["revision"] == 3 and fixture.confirmed == 0
         page.locator("#confirmReviewButton").click()
         expect(page.locator("#reviewDialog")).not_to_be_visible()
@@ -507,8 +511,8 @@ def main():
         page.locator('[name=pricing_unit_id]').select_option("usd_ktoken")
         page.locator('[name=amount]').fill("2")
         expect(page.locator("#quotePreview")).to_contain_text("USD 2")
-        expect(page.locator("#quotePreview")).to_contain_text("前端反算付款倍率：560.00 × / 5600.0 折")
-        expect(page.locator("#quotePreview").locator(".display-conversion")).to_have_count(0)
+        expect(page.locator("#quotePreview")).to_contain_text("按官网反算折扣 5600.0折")
+        expect(page.locator("#quotePreview").locator(".price-display:not(.pricing-result) > .display-conversion")).to_have_count(0)
         page.locator("#saveQuoteButton").click()
         expect(page.locator("#quoteRows tr")).to_have_count(3)
         expect(page.locator("#quoteRows tr").last).to_contain_text("USD 2")
@@ -628,7 +632,7 @@ def main():
         expect(page.locator("#quoteRows tr").last).to_contain_text("CNY 1")
         expect(page.locator("#quoteRows tr").last.locator(".display-conversion")).to_have_count(0)
         page.locator("#pricingConversionButton").click()
-        expect(page.locator("#quoteRows tr").last).to_contain_text("工程估算倍率")
+        expect(page.locator("#quoteRows tr").last).to_contain_text("按官网估算折扣")
         assert fixture.context["token_equivalences"][0]["source"] == "Synthetic measurement"
 
         # Every calculation is a frontend projection, including both raw fields and null/zero inputs.
@@ -685,7 +689,7 @@ def main():
 
         # No supplier, billing item or unit is required, and zero is a real raw discount value.
         page.locator("#newQuoteButton").click()
-        page.locator('[name=model_id]').fill("smoke-a")
+        page.locator('[name=model_id]').fill("missing-official")
         expect(page.locator('[name=billing_item]')).to_have_value("")
         expect(page.locator('[name=pricing_unit_id]')).to_have_value("")
         page.locator('[name=discount_rate]').fill("0")
@@ -694,7 +698,7 @@ def main():
         raw = fixture.quotes[-1]
         assert raw["amount"] is None and raw["discount_rate"] == "0.00"
         assert raw["supplier"] is None and raw["billing_item"] is None and raw["pricing_unit_id"] is None
-        expect(page.locator("#quoteRows tr").last).to_contain_text("原始付款倍率 0.00 × / 0.0 折")
+        expect(page.locator("#quoteRows tr").last).to_contain_text("源折扣 0.0折")
         expect(page.locator("#quoteRows tr").last).to_contain_text("缺失官网价")
 
         # Display-only discount and derived-price columns export, retaining null originals.
@@ -703,7 +707,7 @@ def main():
             page.locator("#exportFilteredButton").click()
         pricing_book = load_workbook(BytesIO(Path(pricing_download.value.path()).read_bytes()), read_only=True)
         pricing_rows = list(pricing_book.active.iter_rows(values_only=True))
-        assert "原始付款倍率（两位小数）" in pricing_rows[0] and "前端反算付款倍率（两位小数）" in pricing_rows[0]
+        assert "源折扣（折，一位小数）" in pricing_rows[0] and "按官网反算折扣（折，一位小数）" in pricing_rows[0]
         assert fixture.view_exports[-1]["rows"][-1]["original_amount"] is None
         assert fixture.view_exports[-1]["rows"][-1]["original_discount_rate"] == "0.00"
         assert fixture.view_exports[-1]["rows"][-1]["frontend_pricing_reason"] == "缺失官网价"
@@ -712,7 +716,7 @@ def main():
         raw_before_lookup = deepcopy(fixture.quotes)
         page.locator("#quoteRows tr").last.locator(".official-lookup").first.click()
         expect(page.locator("#reviewDialog")).to_be_visible(timeout=15000)
-        assert fixture.lookup_requests[-1] == {"model_id":"smoke-a","billing_item":None,"prompt":""}
+        assert fixture.lookup_requests[-1] == {"model_id":"missing-official","billing_item":None,"prompt":""}
         assert page.locator("#sessionSelect").input_value().startswith("fresh-official-session-")
         assert fixture.quotes == raw_before_lookup
         page.locator("#cancelReviewButton").click()

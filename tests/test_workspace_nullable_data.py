@@ -76,7 +76,22 @@ def test_populated_not_null_schema_migrates_without_rewriting_business_history(t
         payload.pop("physical_key")
         before["pricing_model"] = [(previous_model[0], previous_model[1],
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")), *previous_model[4:])]
-        assert after == before
+        for table in set(names) - {"pricing_official", "pricing_quote", "pricing_audit", "sqlite_sequence"}:
+            assert after[table] == before[table]
+        for previous, current in zip(before["pricing_official"], after["pricing_official"], strict=True):
+            assert current[1:3] == previous[:2]
+            assert current[4] == previous[3] + 1 and current[5] == previous[4]
+            old_payload, new_payload = json.loads(previous[2]), json.loads(current[3])
+            assert all(new_payload[key] == value for key, value in old_payload.items())
+            assert new_payload["official_price_id"] == current[0]
+        for previous, current in zip(before["pricing_quote"], after["pricing_quote"], strict=True):
+            assert current[:5] == previous[:5] and current[6] == previous[6]
+            assert current[7] == previous[7] + 1 and current[8] == previous[8]
+            old_payload, new_payload = json.loads(previous[5]), json.loads(current[5])
+            assert all(new_payload[key] == value for key, value in old_payload.items())
+        assert after["pricing_audit"][:len(before["pricing_audit"])] == before["pricing_audit"]
+        assert dict(after["sqlite_sequence"])["pricing_quote"] == dict(before["sqlite_sequence"])["pricing_quote"]
+        assert store._conn.execute("SELECT count(*) FROM pricing_audit WHERE actor='migration:pricing-conditions'").fetchone()[0] == 2
         assert "physical_key" not in {row["name"] for row in store._conn.execute("PRAGMA table_info(pricing_model)")}
         assert [tuple(row) for row in store._conn.execute(
             "SELECT type,name,sql FROM sqlite_master WHERE name LIKE 'custom_%' ORDER BY name")] == auxiliary
@@ -86,7 +101,7 @@ def test_populated_not_null_schema_migrates_without_rewriting_business_history(t
                               "pricing_quote": {"billing_item", "supplier_id", "channel_id"}}.items():
             assert all(not row["notnull"] for row in store._conn.execute(f"PRAGMA table_info({table})") if row["name"] in fields)
         prior = store.get_quote(7)
-        assert prior.revision == 3 and prior.amount == Decimal("8") and prior.discount_rate == Decimal("0.83")
+        assert prior.revision == 4 and prior.amount == Decimal("8") and prior.discount_rate == Decimal("0.83")
         assert prior.official_price["amount"] == "100" and prior.derived_amount is None
         new = store.apply_bundle({"create": [{"model_id": "new-only-id"}]})["items"][0]
         assert new["id"] == 1000 and new["supplier_id"] is None and new["vendor"] is None
@@ -183,12 +198,17 @@ def test_null_billing_official_is_unique_and_never_matches_input_price():
         item = store.apply_bundle({"create": [{"model_id": "x", "discount_rate": "0.8"}]})["items"][0]
         assert item["official_price"] is None
         store.apply_bundle({"official_prices": [{"model_id": "x", "amount": "20"}]})
-        assert store.get_quote(item["id"]).official_price["amount"] == "20"
+        unknown = store.get_quote(item["id"])
+        assert unknown.official_price is None and unknown.official_match.status == "needs_scope"
+        assert len(unknown.official_match.candidate_ids) == 2
         with pytest.raises(RevisionConflictError):
             store.apply_bundle({"official_prices": [{"model_id": "x", "billing_item": "", "amount": "30"}]})
+        store.apply_bundle({"official_prices": [{"model_id": "x", "amount": "30",
+            "pricing_conditions": {"market": "domestic"}}]})
+        assert len(store.catalog_snapshot()["official_prices"]) == 3
+        identifier = store.catalog_snapshot()["official_prices"][0]["official_price_id"]
         with pytest.raises(sqlite3.IntegrityError):
-            store._conn.execute("INSERT INTO pricing_official VALUES ('x',NULL,'{}',1,'x','x')")
-        assert len(store.catalog_snapshot()["official_prices"]) == 2
+            store._conn.execute("INSERT INTO pricing_official VALUES (?,'x',NULL,'{}',1,'x','x')", (identifier,))
     finally:
         store.close()
 

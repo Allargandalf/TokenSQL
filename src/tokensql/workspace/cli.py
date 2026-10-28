@@ -37,7 +37,7 @@ def _schema() -> dict[str, Any]:
         "notes": [
             "Only model_id is required; missing models are created automatically. No physical identity field.",
             "New rows default omitted currency to CNY; explicit null remains unknown and unit IDs determine their own currency.",
-            "Use exact Decimal strings. A complete pricing unit must be one of the 12 pricing_unit_id values.",
+            "Use exact Decimal strings. A complete pricing unit must be one of the 21 pricing_unit_id values returned by pricing-units.",
             "currency/unit/unit_quantity are strict compatibility input only and may not conflict with pricing_unit_id.",
             "Preserve independent source amount and discount_rate, including discount-only records.",
             "Partial known currency/unit/quantity context is preserved; Tokens never implies 1K or 1M.",
@@ -47,6 +47,9 @@ def _schema() -> dict[str, Any]:
             "Delete operations physically remove selected quote rows and retain before snapshots in the audit log.",
             "discount_rate is the paid-price multiplier, and may exceed one.",
             "Official records allow nullable business metadata; provide source/source_ref evidence whenever known.",
+            "One model can have several official billing_metric + pricing_conditions scenarios; update by stable official_price_id and revision.",
+            "discount_scope is unknown/model/items; a missing billing item does not imply all items.",
+            "Only unresolved price-applicability conditions belong in pricing_conditions.raw; source cells belong in source_ref.",
             "Conversion requires original_currency/original_amount/exchange_rate/rate_source.",
             "Preview evaluates only in memory. Apply is atomic and --import-id makes retries idempotent.",
         ],
@@ -76,7 +79,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--db", required=True, help="SQLite path, or :memory: for isolated checks")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("schema", help="print exact quote and bundle JSON schemas")
-    commands.add_parser("pricing-units", help="print the closed 12-item pricing-unit dictionary")
+    commands.add_parser("pricing-units", help="print the versioned pricing-unit dictionary")
     commands.add_parser("pricing-context", help="read versioned FX and token-equivalence context")
     context = commands.add_parser("context-set", help="replace context from a JSON object, retaining history")
     context.add_argument("input", type=Path)

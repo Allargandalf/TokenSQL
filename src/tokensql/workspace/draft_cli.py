@@ -29,8 +29,13 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description=__doc__,
         epilog=("Only model_id is required. Other business fields may be null; pure discounts and "
-                "partial units are valid. A complete pricing_unit_id uses one of the 12 dictionary "
-                "values: USD/HKD/CNY x ktoken/mtoken/second/image. Never derive raw amount or "
+                "partial units are valid. Preserve original billing_item labels; use billing_metric, "
+                "typed pricing_conditions, and explicit discount_scope/discount_items only with "
+                "source evidence. Unknown scope never means all official items. Keep same-model "
+                "condition variants separate and model-wide raw discounts as one supplier row. "
+                "A complete pricing_unit_id uses the current schema dictionary: USD/HKD/CNY x "
+                "ktoken/mtoken/second/image/mtoken_hour/request/account_month. Never treat "
+                "mtoken_hour/request/account_month as token equivalents. Never derive raw amount or "
                 "discount_rate. Observed discount_rate is normalized by deterministic code to exactly "
                 "two decimal places using ROUND_HALF_UP (0.80 means eight-tenths payment; "
                 "0.15 means 1.5 Chinese zhe). Null stays null; negative input is rejected before "

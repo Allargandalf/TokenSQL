@@ -24,7 +24,8 @@ EXPORT_COLUMNS = (
     "discount_rate", "pricing_basis", "raw_discount_rate", "derived_amount",
     "converted_supplier_amount", "converted_supplier_pricing_unit_id", "conversion_status",
     "conversion_evidence", "discount_status", "discount_evidence", "normalized", "display_issues",
-    "currency", "unit", "unit_quantity", "legacy_unit", "conditions", "dimension", "direction", "effective_date",
+    "currency", "unit", "unit_quantity", "legacy_unit", "conditions", "billing_metric", "pricing_conditions",
+    "discount_scope", "discount_items", "official_prices", "official_match", "effective_discount_rules", "dimension", "direction", "effective_date",
     "source", "source_ref", "conversion", "note", "pricing_issue", "status", "revision",
     "created_at", "updated_at",
 )

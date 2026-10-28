@@ -14,7 +14,7 @@ def test_agent_rules_name_formal_units_and_forbid_persisting_display_state():
     expected = {
         f"{currency}_{scale}"
         for currency in ("usd", "hkd", "cny")
-        for scale in ("ktoken", "mtoken", "second", "image")
+        for scale in ("ktoken", "mtoken", "second", "image", "mtoken_hour", "request", "account_month")
     }
     assert all(unit_id in BASE_RULES for unit_id in expected)
     assert "amount and its pricing_unit_id as separate raw business fields" in BASE_RULES

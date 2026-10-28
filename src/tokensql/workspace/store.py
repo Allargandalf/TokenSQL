@@ -10,8 +10,10 @@ from pathlib import Path
 import sqlite3
 from threading import RLock
 from typing import Any
+from uuid import uuid4
 
 from .discount import normalize_discount_rate
+from .pricing_conditions import compact_conditions, legacy_metric, legacy_official_semantics, legacy_quote_scope, match_official_prices, scenario_key
 from .pricing import canonical_unit, identity_key
 from .units import canonical_price_payload, expand_price_payload
 from .conversion import quote_projection
@@ -84,10 +86,10 @@ class WorkspaceStore:
                     alias_key TEXT NOT NULL, model_id TEXT NOT NULL REFERENCES pricing_model(model_id),
                     PRIMARY KEY(vendor_id,alias_key));
                 CREATE TABLE IF NOT EXISTS pricing_official (
+                    official_price_id TEXT PRIMARY KEY,
                     model_id TEXT NOT NULL REFERENCES pricing_model(model_id),
                     billing_item TEXT, payload TEXT NOT NULL, revision INTEGER NOT NULL,
-                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                    PRIMARY KEY(model_id,billing_item));
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS pricing_supplier (
                     supplier_id TEXT PRIMARY KEY, name TEXT NOT NULL, name_key TEXT NOT NULL UNIQUE,
                     provider_type TEXT NOT NULL DEFAULT 'unknown', revision INTEGER NOT NULL DEFAULT 1);
@@ -121,13 +123,19 @@ class WorkspaceStore:
                     import_id TEXT PRIMARY KEY, payload_sha256 TEXT NOT NULL,
                     result TEXT NOT NULL, created_at TEXT NOT NULL);
             """)
-            self._migrate_nullable_schema()
-            self._migrate_discount_precision()
-            initial = self._default_context()
-            self._conn.execute("INSERT OR IGNORE INTO pricing_context VALUES (1,1,?,?)",
-                               (_json(initial), "1970-01-01T00:00:00+00:00"))
-            self._conn.execute("INSERT OR IGNORE INTO pricing_context_history VALUES (1,?,?,?)",
-                               (_json(initial), "system", "1970-01-01T00:00:00+00:00"))
+            self._conn.execute("PRAGMA foreign_keys=OFF")
+            try:
+                with self._transaction():
+                    self._migrate_nullable_schema()
+                    self._migrate_discount_precision()
+                    self._migrate_pricing_conditions()
+                    initial = self._default_context()
+                    self._conn.execute("INSERT OR IGNORE INTO pricing_context VALUES (1,1,?,?)",
+                                       (_json(initial), "1970-01-01T00:00:00+00:00"))
+                    self._conn.execute("INSERT OR IGNORE INTO pricing_context_history VALUES (1,?,?,?)",
+                                       (_json(initial), "system", "1970-01-01T00:00:00+00:00"))
+            finally:
+                self._conn.execute("PRAGMA foreign_keys=ON")
 
     def _migrate_nullable_schema(self) -> None:
         """Atomically relax nullable fields and remove the redundant physical identity."""
@@ -148,12 +156,12 @@ class WorkspaceStore:
                            self._conn.execute("SELECT model_id,payload FROM pricing_model")
                            if "physical_key" in json.loads(row["payload"])]
         if not needed and not payload_cleanup:
-            self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_pricing_official_unclassified "
+            self._conn.execute("CREATE INDEX IF NOT EXISTS ix_pricing_official_unclassified "
                                "ON pricing_official(model_id) WHERE billing_item IS NULL")
             return
-        if self._conn.in_transaction:
-            raise RuntimeError("schema migration must start outside a transaction")
-        self._conn.execute("PRAGMA foreign_keys=OFF")
+        manage_foreign_keys = not self._conn.in_transaction
+        if manage_foreign_keys:
+            self._conn.execute("PRAGMA foreign_keys=OFF")
         try:
             with self._transaction():
                 for table, names in needed.items():
@@ -225,12 +233,13 @@ class WorkspaceStore:
                         for alias in {identity_key(value) for value in json.loads(row["payload"]).get("aliases", [])} - {""}:
                             self._conn.execute("INSERT INTO pricing_alias VALUES (?,?,?)",
                                                (row["vendor_id"], alias, row["model_id"]))
-                self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_pricing_official_unclassified "
+                self._conn.execute("CREATE INDEX IF NOT EXISTS ix_pricing_official_unclassified "
                                    "ON pricing_official(model_id) WHERE billing_item IS NULL")
                 if self._conn.execute("PRAGMA foreign_key_check").fetchall():
                     raise RuntimeError("schema migration would violate existing foreign keys")
         finally:
-            self._conn.execute("PRAGMA foreign_keys=ON")
+            if manage_foreign_keys:
+                self._conn.execute("PRAGMA foreign_keys=ON")
 
     def _migrate_discount_precision(self) -> None:
         """Normalize only stored source ratios, with atomic revisioned before/after audits."""
@@ -254,6 +263,76 @@ class WorkspaceStore:
                     "UPDATE pricing_quote SET payload=?,revision=revision+1,updated_at=? WHERE id=?",
                     (_json(current), now, row["id"]))
                 self._audit("quote", row["id"], "updated", "migration:discount-2dp", old, new)
+
+    def _migrate_pricing_conditions(self) -> None:
+        """Migrate IDs and explicit legacy scope in one revisioned, fully rollbackable transaction."""
+        fields = {row["name"] for row in self._conn.execute("PRAGMA table_info(pricing_official)")}
+        rebuild = "official_price_id" not in fields
+        auxiliary = [row["sql"] for row in self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE tbl_name='pricing_official' AND type IN ('index','trigger') "
+            "AND sql IS NOT NULL") if row["sql"] and "ix_pricing_official_unclassified" not in row["sql"]]
+        official = self._conn.execute("SELECT rowid AS migration_rowid,* FROM pricing_official").fetchall()
+        quotes = self._conn.execute("SELECT * FROM pricing_quote ORDER BY id").fetchall()
+        with self._transaction():
+            if rebuild:
+                self._conn.execute("""CREATE TABLE __conditions_pricing_official (
+                    official_price_id TEXT PRIMARY KEY,
+                    model_id TEXT NOT NULL REFERENCES pricing_model(model_id),
+                    billing_item TEXT, payload TEXT NOT NULL, revision INTEGER NOT NULL,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+            for row in official:
+                previous = json.loads(row["payload"])
+                identifier = (row["official_price_id"] if not rebuild else
+                    "op-" + hashlib.sha256(_json([row["model_id"], row["billing_item"],
+                    row["created_at"], row["migration_rowid"]]).encode()).hexdigest()[:32])
+                current = dict(previous)
+                current.setdefault("official_price_id", identifier)
+                inferred_metric, inferred_conditions = legacy_official_semantics(row["billing_item"])
+                current.setdefault("billing_metric", inferred_metric)
+                current.setdefault("pricing_conditions", inferred_conditions)
+                current.setdefault("conditions", {})
+                if previous.get("conditions") and "pricing_conditions" not in previous:
+                    current["pricing_conditions"] = {**inferred_conditions, "raw": previous["conditions"]}
+                changed = current != previous
+                now = _utc_text() if changed else row["updated_at"]
+                revision = row["revision"] + int(changed)
+                metadata = {key: row[key] for key in ("revision", "created_at", "updated_at")}
+                if rebuild:
+                    self._conn.execute("INSERT INTO __conditions_pricing_official VALUES (?,?,?,?,?,?,?)",
+                        (identifier, row["model_id"], row["billing_item"], _json(current),
+                         revision, row["created_at"], now))
+                elif changed:
+                    self._conn.execute("UPDATE pricing_official SET payload=?,revision=?,updated_at=? WHERE official_price_id=?",
+                                       (_json(current), revision, now, identifier))
+                if changed:
+                    self._audit("official_price", identifier, "updated", "migration:pricing-conditions",
+                        {**previous, **metadata}, {**current, **metadata, "revision": revision, "updated_at": now})
+            if rebuild:
+                # No other table references this formerly composite primary key.
+                self._conn.execute("DROP TABLE pricing_official")
+                self._conn.execute("ALTER TABLE __conditions_pricing_official RENAME TO pricing_official")
+                for statement in auxiliary:
+                    self._conn.execute(statement)
+            self._conn.execute("CREATE INDEX IF NOT EXISTS ix_pricing_official_model ON pricing_official(model_id,billing_item)")
+            for row in quotes:
+                previous = json.loads(row["payload"])
+                current = dict(previous)
+                current.setdefault("billing_metric", legacy_metric(row["billing_item"]))
+                current.setdefault("pricing_conditions", {})
+                current.setdefault("discount_scope", legacy_quote_scope(previous))
+                current.setdefault("discount_items", [])
+                if current == previous:
+                    continue
+                now = _utc_text()
+                metadata = {key: row[key] for key in ("id", "model_id", "billing_item", "supplier_id",
+                            "channel_id", "status", "revision", "created_at", "updated_at")}
+                self._conn.execute("UPDATE pricing_quote SET payload=?,revision=revision+1,updated_at=? WHERE id=?",
+                                   (_json(current), now, row["id"]))
+                self._audit("quote", row["id"], "updated", "migration:pricing-conditions",
+                            {**previous, **metadata},
+                            {**current, **metadata, "revision": row["revision"] + 1, "updated_at": now})
+            if self._conn.execute("PRAGMA foreign_key_check").fetchall():
+                raise RuntimeError("pricing-condition migration would violate foreign keys")
 
     @staticmethod
     def _default_context() -> dict[str, Any]:
@@ -321,14 +400,23 @@ class WorkspaceStore:
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
-        self._conn.execute("BEGIN IMMEDIATE")
+        nested = self._conn.in_transaction
+        savepoint = "workspace_" + uuid4().hex
+        self._conn.execute("SAVEPOINT " + savepoint if nested else "BEGIN IMMEDIATE")
         try:
             yield
         except Exception:
-            self._conn.rollback()
+            if nested:
+                self._conn.execute("ROLLBACK TO SAVEPOINT " + savepoint)
+                self._conn.execute("RELEASE SAVEPOINT " + savepoint)
+            else:
+                self._conn.rollback()
             raise
         else:
-            self._conn.commit()
+            if nested:
+                self._conn.execute("RELEASE SAVEPOINT " + savepoint)
+            else:
+                self._conn.commit()
 
     def _audit(self, kind: str, key: Any, action: str, actor: str,
                old: dict | None, new: dict | None) -> None:
@@ -411,37 +499,66 @@ class WorkspaceStore:
         if self._conn.execute("SELECT 1 FROM pricing_model WHERE model_id=?", (model_id,)).fetchone() is None:
             self._put_model(ModelCreate(model_id=model_id), actor)
 
+    @staticmethod
+    def _official_payload(item: OfficialPriceCreate) -> dict[str, Any]:
+        data = canonical_price_payload(item.model_dump(mode="json", exclude={"expected_revision"}))
+        data["pricing_conditions"] = compact_conditions(data.get("pricing_conditions"))
+        inferred_metric, inferred_conditions = legacy_official_semantics(item.billing_item)
+        if data.get("billing_metric") is None:
+            data["billing_metric"] = inferred_metric
+        if any(key in data["pricing_conditions"] and data["pricing_conditions"][key] != value
+               for key, value in inferred_conditions.items()):
+            raise ValueError("explicit pricing_conditions conflict with the original billing_item")
+        data["pricing_conditions"] = {**inferred_conditions, **data["pricing_conditions"]}
+        if item.conditions and "pricing_conditions" not in item.model_fields_set:
+            data["pricing_conditions"]["raw"] = dict(item.conditions)
+        return data
+
     def _put_official(self, item: OfficialPriceCreate, actor: str, skip_quote_ids: Sequence[int] = ()) -> None:
         self._ensure_model(item.model_id, actor)
-        old = self._conn.execute(
-            "SELECT * FROM pricing_official WHERE model_id=? AND billing_item IS ?",
-            (item.model_id, item.billing_item),
-        ).fetchone()
-        expanded = item.model_dump(mode="json", exclude={"expected_revision"})
-        data = canonical_price_payload(expanded)
+        data = self._official_payload(item)
+        old = None
+        if item.official_price_id is not None:
+            old = self._conn.execute("SELECT * FROM pricing_official WHERE official_price_id=?",
+                                     (item.official_price_id,)).fetchone()
+        else:
+            candidates = self._conn.execute(
+                "SELECT * FROM pricing_official WHERE model_id=? AND billing_item IS ?",
+                (item.model_id, item.billing_item)).fetchall()
+            if item.expected_revision is not None:
+                if len(candidates) > 1:
+                    raise RevisionConflictError("multiple official scenarios; official_price_id required")
+                old = candidates[0] if candidates else None
+            else:
+                same = [row for row in candidates if scenario_key(json.loads(row["payload"])) == scenario_key(data)]
+                if len(same) > 1:
+                    raise RevisionConflictError("conflicting official scenarios; official_price_id required")
+                old = same[0] if same else None
+        identifier = old["official_price_id"] if old else item.official_price_id or "op-" + uuid4().hex
+        data["official_price_id"] = identifier
         if old and json.loads(old["payload"]) == data:
             if item.expected_revision is not None and item.expected_revision != old["revision"]:
                 raise RevisionConflictError("official price revision changed")
             return
-        self._check_revision(old, item.expected_revision, f"official {item.model_id}/{item.billing_item}")
+        self._check_revision(old, item.expected_revision, f"official {identifier}")
+        # New scenarios may share a metric. Identical structured scenarios are never silently overwritten.
+        conflicts = [row for row in self._conn.execute("SELECT * FROM pricing_official WHERE model_id=?",
+                     (item.model_id,)) if row["official_price_id"] != identifier and
+                     scenario_key(json.loads(row["payload"])) == scenario_key(data)]
+        if conflicts:
+            raise RevisionConflictError("official scenario already exists; update its official_price_id and revision")
         now = _utc_text()
         if old:
             self._conn.execute(
-                "UPDATE pricing_official SET payload=?,revision=revision+1,updated_at=?"
-                " WHERE model_id=? AND billing_item IS ?",
-                (_json(data), now, item.model_id, item.billing_item),
-            )
+                "UPDATE pricing_official SET model_id=?,billing_item=?,payload=?,revision=revision+1,updated_at=?"
+                " WHERE official_price_id=?",
+                (item.model_id, item.billing_item, _json(data), now, identifier))
         else:
-            self._conn.execute("INSERT INTO pricing_official VALUES (?,?,?,1,?,?)",
-                               (item.model_id, item.billing_item, _json(data), now, now))
-        new = self._conn.execute(
-            "SELECT * FROM pricing_official WHERE model_id=? AND billing_item IS ?",
-            (item.model_id, item.billing_item),
-        ).fetchone()
-        self._audit("official_price", f"{item.model_id}/{item.billing_item}", "updated" if old else "added",
-                    actor, self._catalog_row(old) if old else None, self._catalog_row(new))
-        # Official/context changes never derive or overwrite raw supplier prices.
-        # Price/discount conversions are frontend-only display/export operations.
+            self._conn.execute("INSERT INTO pricing_official VALUES (?,?,?,?,1,?,?)",
+                               (identifier, item.model_id, item.billing_item, _json(data), now, now))
+        new = self._conn.execute("SELECT * FROM pricing_official WHERE official_price_id=?", (identifier,)).fetchone()
+        self._audit("official_price", identifier, "updated" if old else "added", actor,
+                    self._catalog_row(old) if old else None, self._catalog_row(new))
 
     def _require_model(self, model_id: str) -> sqlite3.Row:
         row = self._conn.execute("SELECT * FROM pricing_model WHERE model_id=?", (model_id,)).fetchone()
@@ -449,16 +566,24 @@ class WorkspaceStore:
             raise ValueError(f"unknown model_id {model_id}")
         return row
 
+    def _official_prices(self, model_id: str) -> list[dict[str, Any]]:
+        return [expand_price_payload(self._catalog_row(row), allow_legacy=True)
+                for row in self._conn.execute("SELECT * FROM pricing_official WHERE model_id=? ORDER BY official_price_id",
+                                              (model_id,))]
+
     def _official(self, model_id: str, billing_item: str | None) -> dict[str, Any] | None:
-        row = self._conn.execute(
-            "SELECT * FROM pricing_official WHERE model_id=? AND billing_item IS ?", (model_id, billing_item)
-        ).fetchone()
-        return expand_price_payload(self._catalog_row(row), allow_legacy=True) if row else None
+        candidates = [item for item in self._official_prices(model_id) if item.get("billing_item") == billing_item]
+        if len(candidates) > 1:
+            raise RevisionConflictError("multiple official scenarios; official_price_id required")
+        return candidates[0] if candidates else None
 
     def _prepare_quote(self, item: QuoteCreate, *, validate: bool = True,
                        actor: str = "manual/cli") -> tuple[dict, str | None, int | None]:
         self._ensure_model(item.model_id, actor)
         data = canonical_price_payload(item.model_dump(mode="json"))
+        data["pricing_conditions"] = compact_conditions(data.get("pricing_conditions"))
+        if data.get("billing_metric") is None:
+            data["billing_metric"] = legacy_metric(item.billing_item)
         discount = normalize_discount_rate(item.discount_rate)
         data["discount_rate"] = None if discount is None else format(discount, "f")
         if item.supplier is None:
@@ -483,15 +608,62 @@ class WorkspaceStore:
         ).fetchone()
         return data, supplier_id, int(channel["channel_id"])
 
+    def _effective_discount_rules(self, row: sqlite3.Row, official: list[dict],
+                                  matched: list[dict]) -> list[dict[str, Any]]:
+        """Resolve source rule precedence for all pages without deriving any price."""
+        if row["supplier_id"] is None:
+            rows = [row]
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM pricing_quote WHERE model_id=? AND supplier_id IS ? AND channel_id IS ? "
+                "AND status='active' ORDER BY id",
+                (row["model_id"], row["supplier_id"], row["channel_id"])).fetchall()
+        eligible: dict[str, list[tuple[int, sqlite3.Row, dict]]] = {}
+        source_tags = set(json.loads(row["payload"]).get("tags") or [])
+        for candidate in rows:
+            value = json.loads(candidate["payload"])
+            if set(value.get("tags") or []) != source_tags:
+                continue
+            if value.get("discount_rate") is None:
+                continue
+            applicable, _ = match_official_prices(value, official)
+            rank = 0 if value.get("discount_scope") == "model" else 1
+            for price in applicable:
+                eligible.setdefault(price["official_price_id"], []).append((rank, candidate, value))
+        result = []
+        for price in matched:
+            identifier = price["official_price_id"]
+            candidates = eligible.get(identifier, [])
+            common = {"official_price_id": identifier, "quote_id": None, "discount_rate": None,
+                      "discount_scope": "unknown", "candidate_quote_ids": []}
+            if not candidates:
+                result.append({**common, "reason": "no_discount_rule"})
+                continue
+            priority = max(item[0] for item in candidates)
+            selected = [item for item in candidates if item[0] == priority]
+            quote_ids = sorted(item[1]["id"] for item in selected)
+            rates = {format(normalize_discount_rate(item[2]["discount_rate"]), "f") for item in selected}
+            if len(rates) != 1:
+                result.append({**common, "reason": "conflicting_discount_rules",
+                               "candidate_quote_ids": quote_ids})
+                continue
+            _, chosen, value = selected[0]
+            result.append({**common, "quote_id": chosen["id"], "discount_rate": rates.pop(),
+                "discount_scope": value.get("discount_scope", "unknown"),
+                "reason": ("item_override" if any(item[0] == 0 for item in candidates) else "explicit_item")
+                          if priority else "model_default", "candidate_quote_ids": quote_ids})
+        return result
+
     def _response(self, row: sqlite3.Row) -> QuoteResponse:
         raw = expand_price_payload(json.loads(row["payload"]), allow_legacy=True)
-        data = quote_projection(raw, self._official(row["model_id"], row["billing_item"]),
-                                self.pricing_context(), at=self._valuation_at)
+        official = self._official_prices(row["model_id"])
+        data = quote_projection(raw, official, self.pricing_context(), at=self._valuation_at)
+        data["effective_discount_rules"] = self._effective_discount_rules(row, official, data["official_prices"])
         model = json.loads(self._require_model(row["model_id"])["payload"])
         data.update(id=row["id"], model_id=row["model_id"], billing_item=row["billing_item"],
                     supplier_id=row["supplier_id"], channel_id=row["channel_id"], vendor=model.get("vendor"),
                     model_name=model.get("model_name"), manufacturer=model.get("vendor"), provider=data.get("supplier"),
-                    metric=row["billing_item"], model_version=None, status=row["status"],
+                    metric=data.get("billing_metric") or row["billing_item"], model_version=None, status=row["status"],
                     revision=row["revision"], created_at=row["created_at"], updated_at=row["updated_at"],
                     official_price=data["official_price"])
         return QuoteResponse.model_validate(data, context={"allow_legacy_unit": True})
@@ -542,6 +714,8 @@ class WorkspaceStore:
         elif any(key in changes for key in ("currency", "unit", "unit_quantity")):
             data.pop("pricing_unit_id", None)
             data.pop("legacy_unit", None)
+        if "billing_item" in changes and "billing_metric" not in changes and data.get("billing_metric") == legacy_metric(data.get("billing_item")):
+            data["billing_metric"] = None
         data.update(changes)
         # Source amount and source discount are independent facts; editing either never clears the other.
         item = QuoteCreate.model_validate(data)
@@ -573,7 +747,28 @@ class WorkspaceStore:
                      import_id: str | None = None, *,
                      expected_catalog_token: str | None = None) -> dict[str, Any]:
         bundle = PricingBundle.model_validate(bundle)
-        payload_hash = hashlib.sha256(_json(bundle.model_dump(mode="json")).encode()).hexdigest()
+        serialized = bundle.model_dump(mode="json")
+        payload_hash = hashlib.sha256(_json(serialized).encode()).hexdigest()
+        legacy = json.loads(_json(serialized))
+        compatible = True
+        new_fields = {"billing_metric", "pricing_conditions", "discount_scope", "discount_items", "official_price_id"}
+        for section in ("official_prices", "create"):
+            for item in legacy[section]:
+                for key in new_fields:
+                    value = item.get(key)
+                    if value not in (None, [], "unknown") and (key != "pricing_conditions" or compact_conditions(value)):
+                        compatible = False
+                    item.pop(key, None)
+                if section == "official_prices":
+                    if item.get("conditions"):
+                        compatible = False
+                    item.pop("conditions", None)
+                if item.get("billing_item") is not None:
+                    item["billing_item"] = item["billing_item"].casefold()
+        for operation in legacy["update"]:
+            if new_fields.intersection(operation["changes"]):
+                compatible = False
+        legacy_hash = hashlib.sha256(_json(legacy).encode()).hexdigest() if compatible else None
         if import_id is not None:
             import_id = import_id.strip()
             if not import_id or len(import_id) > 255:
@@ -582,14 +777,15 @@ class WorkspaceStore:
         if len(ids) != len(set(ids)):
             raise ValueError("a quote may only be updated/deleted once per bundle")
         model_ids = [v.model_id for v in bundle.models]
-        official_ids = [(v.model_id, v.billing_item) for v in bundle.official_prices]
+        official_ids = [v.official_price_id or (v.model_id, scenario_key(self._official_payload(v)))
+                        for v in bundle.official_prices]
         if len(model_ids) != len(set(model_ids)) or len(official_ids) != len(set(official_ids)):
             raise ValueError("duplicate model or official-price operations in bundle")
         with self._lock, self._transaction(), self._valuation():
             if import_id:
                 previous = self._conn.execute("SELECT * FROM pricing_import WHERE import_id=?", (import_id,)).fetchone()
                 if previous:
-                    if previous["payload_sha256"] != payload_hash:
+                    if previous["payload_sha256"] not in {payload_hash, legacy_hash}:
                         raise IdempotencyConflictError("import_id was already used for another bundle")
                     result = json.loads(previous["result"])
                     # Historical receipts remain byte-for-byte unchanged on disk; only
@@ -671,7 +867,7 @@ class WorkspaceStore:
             models = [self._catalog_row(r) for r in self._conn.execute("SELECT * FROM pricing_model ORDER BY model_id")]
             official = [expand_price_payload(self._catalog_row(r), allow_legacy=True)
                         for r in self._conn.execute(
-                "SELECT * FROM pricing_official ORDER BY model_id,billing_item")]
+                "SELECT * FROM pricing_official ORDER BY model_id,billing_item,official_price_id")]
             suppliers = [dict(r) for r in self._conn.execute(
                 "SELECT supplier_id,name,provider_type,revision FROM pricing_supplier ORDER BY name")]
             channels = [dict(r) for r in self._conn.execute("SELECT * FROM pricing_channel ORDER BY channel_id")]
@@ -717,9 +913,12 @@ class WorkspaceStore:
             for price in snapshot.get("official_prices", []):
                 result._ensure_model(price["model_id"], "snapshot")
                 result._conn.execute(
-                    "INSERT INTO pricing_official VALUES (?,?,?,?,?,?)",
-                    (price["model_id"], price.get("billing_item"),
-                     _json(raw_price(price, OfficialPriceCreate.model_fields)), price.get("revision", 1),
+                    "INSERT INTO pricing_official VALUES (?,?,?,?,?,?,?)",
+                    (price.get("official_price_id") or "op-" + hashlib.sha256(_json(price).encode()).hexdigest()[:32],
+                     price["model_id"], price.get("billing_item"),
+                     _json({**raw_price(price, OfficialPriceCreate.model_fields), "official_price_id":
+                         price.get("official_price_id") or "op-" + hashlib.sha256(_json(price).encode()).hexdigest()[:32],
+                         "billing_metric": price.get("billing_metric") or legacy_metric(price.get("billing_item"))}), price.get("revision", 1),
                      price.get("created_at", _utc_text()), price.get("updated_at", _utc_text())))
             for supplier in snapshot.get("suppliers", []):
                 result._conn.execute(

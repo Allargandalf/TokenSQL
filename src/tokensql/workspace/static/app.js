@@ -199,41 +199,86 @@
     return node("td", { className: "number-cell" }, [priceDisplay(price)]);
   }
 
-  function officialFor(quote) {
-    return quote.official_price || state.catalog.official_prices.find((price) => price.model_id === quote.model_id && (price.billing_item ?? null) === (quote.billing_item ?? null));
+  function pricingResult(computed) {
+    const result = node("div", { className: "price-display pricing-result" });
+    if (computed?.derivedAmount != null) result.append(node("span", { className: "display-conversion", text:
+      "折后价 " + computed.officialUnit.currency + " " + computed.derivedAmount + " / " + computed.officialUnit.label.replace(/^[A-Z]+\s*\/\s*/, "") }));
+    if (computed?.effectiveRule?.reason === "item_override") result.append(node("span", { className: "muted-cell", text: "采用指定计费项源折扣 " + window.TokenSQLConversion.discountFold(computed.rawDiscount) + "折（报价 #" + computed.effectiveRule.quote_id + "）" }));
+    if (computed?.calculatedDiscountFold != null) result.append(node("span", { className: computed.estimated ? "estimated" : "display-conversion",
+      text: (computed.estimated ? "按官网估算折扣 " : "按官网反算折扣 ") + computed.calculatedDiscountFold + "折" }));
+    if (computed?.reason || computed?.discountIssue) result.append(node("span", { className: "display-conversion unavailable", text: computed.reason || computed.discountIssue }));
+    return result;
   }
 
-  function pricingDisplay(quote) {
-    const raw = window.TokenSQLConversion?.rawDiscount(quote) ?? quote.raw_discount_rate ?? quote.discount_rate;
-    const result = node("div", { className: "price-display pricing-result" }, [
-      node("span", { text: raw == null ? "原始付款倍率未提供" : "原始付款倍率 " + raw + " × / " + window.TokenSQLConversion.discountFold(raw) + " 折", title: raw == null ? "" : "原始付款倍率按 HALF_UP 保留两位小数入库；辅助折数显示一位。" }),
-    ]);
-    if (!window.TokenSQLConversion?.state.pricing) return result;
-    const computed = window.TokenSQLConversion.computePricing(quote);
-    if (computed.calculatedDiscount != null) result.append(node("span", {
-      className: computed.estimated ? "estimated" : "display-conversion",
-      text: (computed.estimated ? "工程估算倍率 " : "前端反算倍率 ") + computed.calculatedDiscount + " × / " + computed.calculatedDiscountFold + " 折" + (computed.discountRounded ? "（两位舍入）" : ""),
-      title: "未舍入付款倍率：" + computed.discountNumerator + " / " + computed.discountDenominator + "；倍率按 HALF_UP 显示两位小数，辅助折数由两位倍率计算；不保存反算结果。" }));
-    if (computed.derivedAmount != null) result.append(node("span", { className: "muted-cell",
-      text: "官网价 × 原始倍率 → " + computed.derivedAmount + " " + computed.officialUnit.label + "（仅显示）" }));
-    if (computed.reason || computed.discountIssue) result.append(node("span", { className: "display-conversion unavailable",
-      text: computed.reason || computed.discountIssue }));
-    if (computed.missingOfficial) {
-      const lookup = node("button", { className: "text-button official-lookup", type: "button", text: "联网补官网价（新会话）" });
-      lookup.addEventListener("click", () => window.TokenSQLReview?.lookupOfficial(quote));
-      result.append(lookup);
+  function officialDetails(quote, calculation = false) {
+    const conditions = window.TokenSQLConditions;
+    const context = conditions.context(quote);
+    const rows = conditions.displayRows(quote);
+    const all = context.matched.length ? context.matched : context.candidates;
+    const detailsKey = String(quote.id ?? quote.model_id) + ":" + calculation;
+    const details = node("details", { className: "official-details" }, [node("summary", { text: calculation ? "展开逐项折后价 / 折扣" : "展开官网计费项与完整条件" })]);
+    details.open = Boolean(conditions.expanded.get(detailsKey));
+    details.addEventListener("toggle", () => conditions.expanded.set(detailsKey, details.open));
+    if (all.length > 1) {
+      const select = node("select"); select.setAttribute("aria-label", "查看 " + quote.model_id + " 的官网计费项" + (calculation ? "计算" : ""));
+      const empty = node("option", { text: "全部 " + all.length + " 项（逐项展示）" }); empty.value = ""; select.append(empty);
+      all.forEach((price) => { const option = node("option", { text: conditions.priceLabel(price) }); option.value = price.official_price_id || ""; select.append(option); });
+      select.value = conditions.selected.get(String(quote.id)) || "";
+      select.addEventListener("change", () => { conditions.selected.set(String(quote.id), select.value); conditions.expanded.set(detailsKey, true); renderRows(); });
+      details.append(select);
     }
-    if (computed.evidence) result.append(node("details", { className: "price-evidence" },
-      [node("summary", { text: "前端计算依据（不写库）" }), node("pre", { text: JSON.stringify(computed.evidence, null, 2) })]));
+    for (const price of rows) {
+      const item = node("section", { className: "official-detail-item" }, [node("strong", { text: conditions.metricLabel(price.billing_metric || price.billing_item) }),
+        node("span", { className: "muted-cell", text: price.billing_item ? "原计费项：" + price.billing_item : "原计费项未提供" }),
+        node("span", { className: "condition-description", text: conditions.conditionText(price.pricing_conditions) })]);
+      if (price.conditions && Object.keys(price.conditions).length) item.append(node("span", { className: "muted-cell", text: "来源原文条件：" + JSON.stringify(price.conditions) }));
+      if (calculation && ["matched", "multiple"].includes(context.status)) item.append(pricingResult(window.TokenSQLConversion.computePricing(quote, price)));
+      else item.append(priceDisplay(price));
+      item.append(node("span", { className: "muted-cell", text: [price.source, price.source_ref, price.revision != null ? "版本 " + price.revision : null].filter(Boolean).join(" · ") }));
+      details.append(item);
+    }
+    return details;
+  }
+
+  function pricingDisplay(quote, force = false) {
+    const conversion = window.TokenSQLConversion;
+    const raw = conversion?.rawDiscount(quote) ?? quote.raw_discount_rate ?? quote.discount_rate;
+    const result = node("div", { className: "price-display pricing-result" }, [
+      node("span", { text: raw == null ? "源折扣未提供" : conversion ? "源折扣 " + conversion.discountFold(raw) + "折" : "源折扣暂不可显示" }),
+      node("span", { className: "muted-cell", text: window.TokenSQLConditions?.scopeLabel(quote.discount_scope) || "适用范围待确认" }),
+    ]);
+    if (!conversion?.state.pricing && !force) return result;
+    const context = window.TokenSQLConditions.context(quote);
+    if (context.status === "multiple") {
+      result.append(node("span", { className: "display-conversion", text: "按 " + context.matched.length + " 项官网价分别计算" }), officialDetails(quote, true));
+    } else {
+      result.append(pricingResult(conversion.computePricing(quote)));
+    }
+    if (context.status === "missing") {
+      const lookup = node("button", { className: "text-button official-lookup", type: "button", text: "联网补官网价（新会话）" });
+      lookup.addEventListener("click", () => window.TokenSQLReview?.lookupOfficial(quote)); result.append(lookup);
+    }
     return result;
   }
 
   function officialCell(quote) {
-    const official = officialFor(quote);
-    if (official?.amount != null) return priceCell(official);
-    const button = node("button", { className: "text-button official-lookup", type: "button", text: "缺失官网价 · 联网补全" });
-    button.addEventListener("click", () => window.TokenSQLReview?.lookupOfficial(quote));
-    return node("td", { className: "number-cell" }, [priceDisplay(official), button]);
+    const conditions = window.TokenSQLConditions;
+    if (!conditions) return node("td", { className: "number-cell", text: "正在读取官网价…" });
+    const context = conditions.context(quote);
+    const rows = context.matched.length ? context.matched : context.candidates;
+    const cell = node("td", { className: "number-cell official-cell" });
+    if (context.status === "matched" && rows.length === 1) {
+      cell.append(priceDisplay(rows[0]), node("span", { className: "muted-cell", text: conditions.priceLabel(rows[0]) }));
+    } else {
+      cell.append(node("span", { className: "official-count", text: rows.length ? "已有 " + rows.length + " 项官网价" : context.status === "missing" ? "缺失官网价" : context.status === "needs_scope" ? "适用范围待确认" : "官网适用条件待确认" }));
+      if (context.reason && context.status !== "multiple") cell.append(node("span", { className: "condition-description", text: context.reason }));
+      if (rows.length) cell.append(officialDetails(quote));
+    }
+    if (context.status === "missing") {
+      const button = node("button", { className: "text-button official-lookup", type: "button", text: "联网补官网价" });
+      button.addEventListener("click", () => window.TokenSQLReview?.lookupOfficial(quote)); cell.append(button);
+    }
+    return cell;
   }
 
   function renderRows() {
@@ -269,7 +314,8 @@
       }
       row.append(node("td", { className: "check-cell" }, [check]), modelCell,
         tableCell(quote.vendor || quote.manufacturer), supplierCell,
-        node("td", {}, [node("span", { className: "metric-badge", text: valueOrDash(quote.billing_item || quote.metric) })]),
+        node("td", {}, [node("span", { className: "metric-badge", text: window.TokenSQLConditions?.metricLabel(quote.billing_metric || quote.billing_item || quote.metric) || valueOrDash(quote.billing_item) }),
+          node("span", { className: "condition-description", text: window.TokenSQLConditions?.conditionText(quote.pricing_conditions) || "" })]),
         officialCell(quote), priceCell(quote),
         node("td", { className: "number-cell" }, [pricingDisplay(quote)]),
         node("td", {}, [node("span", { text: quote.source || "—" }), node("span", { className: "muted-cell", text: quote.source_ref || "" })]), actions);
@@ -409,7 +455,7 @@
   }
 
   async function exportQuotes(params, displayItems = null) {
-    if (window.TokenSQLConversion?.isActive()) {
+    if (window.TokenSQLConversion) {
       await window.TokenSQLConversion.exportConverted(params, displayItems);
       return;
     }
@@ -442,6 +488,7 @@
     return els.quoteForm.elements.namedItem(name);
   }
 
+  let pricingEditor = null;
   function openEditor(quote = null) {
     state.editing = quote;
     els.editorTitle.textContent = quote ? "编辑报价" : "新增报价";
@@ -465,12 +512,14 @@
     values.discount_rate = window.TokenSQLConversion?.discountFold(originalDiscount) ?? "";
     formField("discount_rate").dataset.originalRatio = window.TokenSQLConversion.discountRatio(originalDiscount) ?? "";
     formField("discount_rate").dataset.initialFold = values.discount_rate;
-    formField("discount_rate").title = originalDiscount == null ? "以折为单位；8.0 代表八折。" : "原始付款倍率：" + window.TokenSQLConversion.discountRatio(originalDiscount) + " ×；保存时倍率统一为两位小数。";
+    formField("discount_rate").title = "以折为单位；8.0 代表八折，折数保留一位小数。";
     Object.keys(values).forEach((name) => {
       const field = formField(name);
       if (!field) return;
       field.value = name === "tags" ? (values.tags || []).join(", ") : name === "conditions" ? (values.conditions == null ? "" : JSON.stringify(values.conditions, null, 2)) : values[name] ?? "";
     });
+    pricingEditor = window.TokenSQLConditions.createEditor(values, { quote: true, label: "供应商报价", onChange: () => calculateQuotePreview() });
+    $("quoteConditionsEditor").replaceChildren(pricingEditor);
     updateComponentFields();
     els.editor.showModal();
     modelSelect.focus();
@@ -481,6 +530,7 @@
     formField("amount").required = false;
     formField("discount_rate").required = false;
     const model = state.catalog.models.find((item) => item.model_id === formField("model_id").value);
+    if (pricingEditor?.setModelId) pricingEditor.setModelId(formField("model_id").value);
     $("editorModelInfo").textContent = model ? `模型商：${valueOrDash(model.vendor)} · 别名：${(model.aliases || []).join(", ") || "无"}` : "输入新模型 ID 即可；确认报价时自动创建缺失模型，无需先审核实体。";
   }
 
@@ -495,6 +545,7 @@
     ["billing_item", "supplier", "supplier_model_id", "source", "source_ref", "note"].forEach((key) => { if (!item[key]) item[key] = null; });
     if (!item.supplier_model_id) item.supplier_model_id = null;
     item.tags = formField("tags").value.split(/[,，]/).map((value) => value.trim()).filter(Boolean);
+    Object.assign(item, pricingEditor?.read() || {});
     item.conditions = JSON.parse(formField("conditions").value.trim() || "null");
     if (item.conditions !== null && (Array.isArray(item.conditions) || typeof item.conditions !== "object")) throw new Error("条件必须是 JSON 对象或留空");
     if (state.editing && !state.editing.pricing_unit_id && !item.pricing_unit_id) {
@@ -513,13 +564,14 @@
         $("quotePreview").textContent = "只需输入模型 ID；其余字段均可留空。币种默认人民币，计价尺度不猜测。";
         return;
       }
+      const preview = state.editing
+        ? await api("/catalog/preview", { method: "POST", body: JSON.stringify({ update: [{ id: state.editing.id, expected_revision: state.editing.revision, changes: item }] }) })
+        : await api("/quotes/preview", { method: "POST", body: JSON.stringify({ items: [item] }) });
       if (serial !== previewSerial) return;
-      const computed = window.TokenSQLConversion?.computePricing(item);
-      $("quotePreview").replaceChildren(node("strong", { text: "前端计算预览 · 不反填保存 · 缺字段也可保存" }),
-        priceDisplay(item),
-        node("p", { text: computed?.calculatedDiscount == null ? computed?.reason || computed?.discountIssue || "未提供原金额，不能反算倍率" : "前端反算付款倍率：" + computed.calculatedDiscount + " × / " + computed.calculatedDiscountFold + " 折" + (computed.discountRounded ? "（两位舍入）" : "") }),
-        node("p", { text: computed?.derivedAmount == null ? "未提供原始倍率或官网价，未推导折后价。" : "前端折后价：" + computed.derivedAmount + " " + computed.officialUnit.label }),
-        node("small", { text: "这里所有计算结果均为临时显示。保存仅使用上方原始输入。" }));
+      const projected = (preview.items || preview.create || []).find((row) => state.editing ? row.id === state.editing.id : row.model_id === item.model_id) || item;
+      const displayed = { ...projected, _officialCatalog: preview.catalog?.official_prices || state.catalog.official_prices };
+      $("quotePreview").replaceChildren(node("strong", { text: "计算预览 · 原始输入独立保存" }), priceDisplay(displayed), pricingDisplay(displayed, true),
+        node("small", { text: "折后价与反算折扣仅供显示及导出。" }));
     } catch (error) { if (serial === previewSerial) $("quotePreview").textContent = error.message; }
   }
 
@@ -809,7 +861,7 @@
     });
   });
 
-  window.TokenSQL = { state, els, $, node, api, toast, priceDisplay, pricingDisplay, renderRows, loadQuotes, loadCatalog, loadPricingUnits, appendMessage, appendProgress, renderToolActivity, checkAgent, addFiles, renderFileChips };
+  window.TokenSQL = { state, els, $, node, api, toast, priceDisplay, pricingDisplay, officialDetails, renderRows, loadQuotes, loadCatalog, loadPricingUnits, appendMessage, appendProgress, renderToolActivity, checkAgent, addFiles, renderFileChips };
   Promise.allSettled([loadPricingUnits().catch((error) => toast(error.message, true)), loadQuotes(), loadCatalog().catch((error) => toast(error.message, true)), checkAgent()]);
   window.setInterval(checkAgent, 30000);
 })();

@@ -21,6 +21,7 @@ from .official_lookup import validate_lookup_bundle
 
 _SAFE = re.compile(r"[^\w.()\uFF08\uFF09\[\]{} +\-@]", re.UNICODE)
 _ZERO = {"added": 0, "updated": 0, "deleted": 0, "total": 0}
+PRICING_POLICY_VERSION = 1
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -107,11 +108,15 @@ class WorkflowService:
             self._save()
         self._upgrade_model_fields()
         self._upgrade_discount_policy()
+        self._upgrade_pricing_policy()
 
     def _upgrade_model_fields(self) -> None:
         if self.state.get("model_id_schema_version") == 1:
             return
         for job in self.state.get("jobs", {}).values():
+            if job.get("status") != "ready":
+                # Historical receipts and in-flight idempotency hashes are immutable.
+                continue
             for key in ("bundle", "original_bundle"):
                 if isinstance(job.get(key), dict):
                     job[key] = legacy_bundle_fields(job[key])
@@ -154,6 +159,33 @@ class WorkflowService:
                 job.update(preview=preview, issues=preview.get("issues", []) + job.get("proposal_issues", []))
                 job.pop("discount_policy_warning", None)
             job.update(discount_policy_version=DISCOUNT_POLICY_VERSION,
+                       revision=job.get("revision", 1) + 1, updated_at=now())
+            changed = True
+        if changed:
+            self._save()
+
+    def _upgrade_pricing_policy(self) -> None:
+        """Refresh pending reviews without inferring scope or rewriting raw proposals."""
+        changed = False
+        for job in self.state.get("jobs", {}).values():
+            if job.get("status") != "ready" or job.get("pricing_policy_version") == PRICING_POLICY_VERSION:
+                continue
+            try:
+                bundle = job.get("bundle")
+                if not isinstance(bundle, dict):
+                    raise ValueError("legacy review has no valid proposal")
+                validate_lookup_bundle(job, bundle, self.store.catalog_snapshot())
+                preview = json_value(self.store.preview_bundle(bundle))
+            except (ValueError, RevisionConflictError) as error:
+                job.update(preview=None, pricing_policy_warning=(
+                    "Legacy draft requires manual revision under the structured pricing policy: "
+                    + type(error).__name__))
+            else:
+                job.update(preview=preview, issues=preview.get("issues", []) + job.get("proposal_issues", []))
+                job.pop("pricing_policy_warning", None)
+            # Both raw bundle baselines stay byte-for-byte business-equivalent. Defaults
+            # projected by the new preview are not confirmed human corrections.
+            job.update(pricing_policy_version=PRICING_POLICY_VERSION,
                        revision=job.get("revision", 1) + 1, updated_at=now())
             changed = True
         if changed:
@@ -290,6 +322,7 @@ class WorkflowService:
         job = {"id": identifier, "run_id": identifier, "import_id": identifier,
                "conversation_id": conversation_id, "status": "queued", "revision": 1,
                "discount_policy_version": DISCOUNT_POLICY_VERSION,
+               "pricing_policy_version": PRICING_POLICY_VERSION,
                "attempt": 1, "clarifications": [], "questions": [], "question_summary": None,
                "intent": "import", "lookup_model_id": None, "lookup_billing_item": None,
                "upload_ids": upload_ids, "prompt": prompt, "bundle": None, "original_bundle": None,
@@ -392,6 +425,7 @@ class WorkflowService:
                 validate_lookup_bundle(job, bundle, self.store.catalog_snapshot())
                 preview = json_value(self.store.preview_bundle(bundle))
                 job.pop("discount_policy_warning", None)
+                job.pop("pricing_policy_warning", None)
                 job.update(bundle=deepcopy(bundle), preview=preview, issues=preview.get("issues", []) + job.get("proposal_issues", []),
                            revision=job["revision"] + 1, updated_at=now())
                 self._save()
@@ -451,7 +485,7 @@ class WorkflowService:
                     raise ValueError("review status or revision conflict")
                 if recovering and job["status"] != "confirming":
                     raise ValueError("review is not awaiting confirmation recovery")
-                if job.get("discount_policy_warning"):
+                if job.get("discount_policy_warning") or job.get("pricing_policy_warning"):
                     raise ValueError("legacy draft requires manual revision before confirmation")
                 # Recheck raw contracts and dedicated lookup scope; never derive missing raw prices.
                 validate_lookup_bundle(job, job["bundle"], self.store.catalog_snapshot())

@@ -15,6 +15,9 @@
     mtoken: "百万 token",
     second: "秒",
     image: "张",
+    mtoken_hour: "百万 token·小时",
+    request: "次请求",
+    account_month: "账号·月",
   };
 
   const SUGGESTIONS = [
@@ -199,6 +202,9 @@
     let sourceFactor = { value: rational(1n), source: "同量纲", temporary: false };
     let targetFactor = sourceFactor;
     const estimated = source.dimension !== target.dimension;
+    if (estimated && (![source.dimension, target.dimension].every((dimension) => ["token", "time", "image"].includes(dimension)))) {
+      return { status: "unavailable", reason: "这些计价单位属于不同量纲，不能换算" };
+    }
     if (estimated) {
       sourceFactor = unitFactor(price, source);
       targetFactor = unitFactor(price, target);
@@ -255,25 +261,40 @@
 
   function convert(price) { return (state.currency || state.scale) ? convertTo(price) : null; }
   function officialFor(price) {
-    return price?.official_price || appState.catalog.official_prices.find((row) =>
-      row.model_id === price.model_id && (row.billing_item ?? null) === (price.billing_item ?? null));
+    const context = window.TokenSQLConditions?.context(price);
+    if (context) return context.matched.length === 1 ? context.matched[0] : null;
+    return price?.official_price || null;
+  }
+  function pricingRows(price) {
+    const context = window.TokenSQLConditions.context(price);
+    return window.TokenSQLConditions.displayRows(price).map((official) => ({
+      official, applicable: context.matched.some((row) => row.official_price_id ? row.official_price_id === official.official_price_id : row === official),
+      pricing: ["matched", "multiple"].includes(context.status) ? computePricing(price, official) : null,
+    }));
   }
   function rawDiscount(price) { return discountRatio(price?.raw_discount_rate ?? price?.discount_rate ?? null); }
-  function computePricing(price) {
-    const official = officialFor(price);
-    const originalDiscount = rawDiscount(price);
-    if (!official || official.amount == null) return { status: "unavailable", reason: "缺失官网价", missingOfficial: true };
+  function computePricing(price, explicitOfficial = null) {
+    const match = window.TokenSQLConditions?.context(price);
+    const official = explicitOfficial || officialFor(price);
+    const effectiveRule = price.effective_discount_rules?.find((row) => row.official_price_id === official?.official_price_id);
+    const originalDiscount = effectiveRule ? discountRatio(effectiveRule.discount_rate) : rawDiscount(price);
+    if (!official) return { status: "unavailable", reason: match?.status === "multiple" ? "已有多项适用官网价，请展开逐项查看折后价。" : match?.reason || "缺失官网价", missingOfficial: !match || match.status === "missing" };
+    if (official.amount == null) return { status: "unavailable", reason: "该官网计费项未提供金额", missingOfficial: match?.status === "missing" };
     const officialUnit = sourceUnit(official);
     if (!officialUnit) return { status: "unavailable", reason: !official.currency && !official.pricing_unit_id ? "官网币种未提供，不能假定同币种" : "官网计价单位缺失或不完整" };
     let officialAmount;
     try { officialAmount = parseDecimal(official.amount); }
     catch (_) { return { status: "unavailable", reason: "官网价不是合法十进制数字" }; }
     const result = { status: "computed", officialAmount: String(official.amount), officialUnit,
-      rawDiscount: originalDiscount, evidence: { calculation: "frontend_only", official_model_id: official.model_id,
+      rawDiscount: originalDiscount, effectiveRule, evidence: { calculation: "frontend_only", official_model_id: official.model_id,
+        official_price_id: official.official_price_id ?? null, official_billing_metric: official.billing_metric ?? null,
+        official_pricing_conditions: official.pricing_conditions || {}, discount_scope: price.discount_scope || "unknown",
+        effective_discount_rule: effectiveRule || null,
         official_billing_item: official.billing_item ?? null, official_revision: official.revision ?? null,
         official_source: official.source ?? null, official_source_ref: official.source_ref ?? null,
         official_amount: String(official.amount), official_pricing_unit_id: officialUnit.id } };
     try {
+      if (effectiveRule?.reason === "conflicting_discount_rules") result.discountIssue = "同等优先级的源折扣冲突，请先确认适用报价。";
       if (originalDiscount != null) {
         const value = multiply(officialAmount, parseDecimal(originalDiscount));
         result.derivedAmount = decimalString(value);
@@ -281,14 +302,15 @@
         result.derivedPrice = { ...price, amount: result.derivedAmount, _displayRational: value,
           pricing_unit_id: officialUnit.id, currency: officialUnit.currency, unit: officialUnit.unit,
           unit_quantity: officialUnit.unit_quantity };
-        result.derivedFormula = "官网原价 × 原始付款倍率";
+        result.derivedFormula = "官网价按源折扣计算";
       }
       if (price.amount != null) {
-        const aligned = convertTo(price, officialUnit);
+        const itemKnown = price.billing_metric || price.billing_item || match?.matched.length === 1;
+        const aligned = itemKnown ? convertTo(price, officialUnit) : { status: "unavailable", reason: "源金额未明确计费项，不能逐项反算折扣" };
         if (!aligned || aligned.status !== "converted") {
           result.discountIssue = aligned?.reason || "供应商计价单位缺失或不完整";
         } else if (officialAmount.n === 0n) {
-          result.discountIssue = "官网价为 0，不能反算付款倍率";
+          result.discountIssue = "官网价为 0，不能反算折扣";
         } else {
           const value = divide(rational(BigInt(aligned.amountNumerator), BigInt(aligned.amountDenominator)), officialAmount);
           result.calculatedDiscount = fixedDecimal(value, 2);
@@ -307,7 +329,7 @@
           result.discountFormula = "供应商原价转换为官网单位 ÷ 官网原价";
         }
       }
-      if (price.amount == null && originalDiscount == null) result.discountIssue = "原金额与原始付款倍率均未提供";
+      if (price.amount == null && originalDiscount == null && !result.discountIssue) result.discountIssue = "源金额与源折扣均未提供";
     } catch (error) { return { status: "unavailable", reason: error.message }; }
     return result;
   }
@@ -329,7 +351,7 @@
       currencyOptions.append(optionButton(currency, state.currency === currency, () => setCurrency(currency))));
     const unitOptions = $("unitConversionOptions");
     unitOptions.replaceChildren(optionButton("恢复原单位", state.scale === null, () => setScale(null)));
-    Object.entries(SCALE_LABELS).forEach(([scale, label]) =>
+    Object.entries(SCALE_LABELS).filter(([scale]) => appState.pricingUnits.items.some((unit) => unit.scale === scale)).forEach(([scale, label]) =>
       unitOptions.append(optionButton(label, state.scale === scale, () => setScale(scale))));
     $("currencyConversionButton").textContent = "币种：" + (state.currency || "原币");
     $("unitConversionButton").textContent = "单位：" + (state.scale ? SCALE_LABELS[state.scale] : "原单位");
@@ -440,12 +462,18 @@
     try {
       const items = providedItems || await filteredItems(params);
       const columns = [
-        ["model_id", "模型 ID"], ["model_name", "模型名称"], ["vendor", "模型商"],
+        ["quote_id", "源报价 ID"], ["model_id", "模型 ID"], ["model_name", "模型名称"], ["vendor", "模型商"],
+        ["billing_metric", "标准计费项"], ["pricing_conditions", "供应商适用条件"],
+        ["discount_scope", "源折扣适用范围"], ["discount_items", "源折扣指定项"],
+        ["official_billing_metric", "官网标准计费项"], ["official_billing_item", "官网原计费项"],
+        ["official_conditions", "官网适用条件"], ["official_amount", "官网原价"], ["official_unit", "官网计价单位"],
+        ["official_source", "官网来源"], ["official_source_ref", "官网来源依据"], ["official_revision", "官网价版本"], ["official_explanation", "官网匹配说明"],
+        ["effective_discount_fold", "本项采用源折扣（折）"], ["effective_quote_id", "本项折扣源报价 ID"], ["effective_discount_basis", "本项折扣依据"],
         ["billing_item", "计费项"], ["supplier", "供应商"], ["tags", "标签"], ["supplier_model_id", "渠道 ID"],
         ["source", "原来源"], ["source_ref", "原来源依据"], ["conditions", "原条件"], ["note", "原备注"],
-        ["original_amount", "原价"], ["original_discount_rate", "原始付款倍率（两位小数）"], ["original_discount_fold", "原始折扣（折，一位小数）"],
+        ["original_amount", "原价"], ["original_discount_rate", "原始存储折扣值（两位小数）"], ["original_discount_fold", "源折扣（折，一位小数）"],
         ["frontend_derived_amount", "前端折后价"], ["frontend_derived_pricing_unit_id", "前端折后价单位"],
-        ["frontend_calculated_discount", "前端反算付款倍率（两位小数）"], ["frontend_calculated_discount_fold", "前端反算折扣（折，一位小数）"], ["frontend_pricing_status", "前端计算状态"],
+        ["frontend_calculated_discount", "按官网反算折扣值（两位小数）"], ["frontend_calculated_discount_fold", "按官网反算折扣（折，一位小数）"],
         ["frontend_pricing_reason", "前端计算说明"], ["frontend_pricing_evidence", "官网价及计算依据"],
         ["frontend_discount_numerator", "反算倍率精确分子"], ["frontend_discount_denominator", "反算倍率精确分母"],
         ["frontend_price_numerator", "折后价精确分子"], ["frontend_price_denominator", "折后价精确分母"],
@@ -460,16 +488,27 @@
         ["multiplier", "总倍率"], ["multiplier_numerator", "倍率有理数分子"], ["multiplier_denominator", "倍率有理数分母"],
         ["decimal_places", "最大小数位"], ["formula", "换算公式 / 未换算原因"], ["factor_source", "工程倍率来源"],
       ].map(([key, label]) => ({ key, label }));
-      const rows = items.map((item) => {
-        const pricing = state.pricing ? computePricing(item) : null;
-        const display = displayPrice(item);
+      const rows = items.flatMap((item) => {
+        const match = window.TokenSQLConditions.context(item);
+        const choices = state.pricing ? pricingRows(item) : [];
+        return (choices.length ? choices : [{ official: null, pricing: state.pricing ? computePricing(item) : null }]).map(({ official, pricing }) => {
+        const display = item.amount == null && state.pricing ? pricing?.derivedPrice || item : item;
         const result = convert(display);
         const source = sourceUnit(item);
         const displaySource = sourceUnit(display);
         const intendedTarget = displaySource ? targetUnit(displaySource) : null;
         const crossDimension = Boolean(source && intendedTarget && source.dimension !== intendedTarget.dimension);
         return {
-          model_id: item.model_id, model_name: item.model_name ?? null, vendor: item.vendor ?? null,
+          quote_id: item.id, model_id: item.model_id, model_name: item.model_name ?? null, vendor: item.vendor ?? null,
+          billing_metric: item.billing_metric || "", pricing_conditions: item.pricing_conditions || {},
+          discount_scope: window.TokenSQLConditions.scopeLabel(item.discount_scope), discount_items: item.discount_items || [],
+          official_billing_metric: official?.billing_metric || official?.billing_item || "",
+          official_billing_item: official?.billing_item || "", official_conditions: official?.pricing_conditions || {},
+          official_amount: official?.amount ?? "", official_unit: sourceUnit(official)?.label || "",
+          official_source: official?.source || "", official_source_ref: official?.source_ref || "", official_revision: official?.revision ?? "",
+          official_explanation: match.reason || (match.matched.length > 1 ? "逐项适用" : "唯一适用官网价"),
+          effective_discount_fold: discountFold(pricing?.rawDiscount), effective_quote_id: pricing?.effectiveRule?.quote_id ?? item.id,
+          effective_discount_basis: pricing?.effectiveRule?.reason === "item_override" ? "指定计费项源折扣优先" : pricing?.effectiveRule?.reason === "conflicting_discount_rules" ? "同等优先级源折扣冲突，未计算" : pricing?.rawDiscount != null ? "采用适用源折扣" : "无适用源折扣",
           billing_item: item.billing_item, supplier: item.supplier ?? item.provider ?? null,
           tags: item.tags == null ? null : JSON.stringify(item.tags), supplier_model_id: item.supplier_model_id ?? null,
           source: item.source ?? null, source_ref: item.source_ref ?? null,
@@ -503,6 +542,7 @@
           formula: result?.formula || result?.reason || "", factor_source: result?.evidence?.factor_source || "",
         };
       });
+      });
       const format = params.get("format") === "xlsx" ? "xlsx" : "csv";
       const filename = "tokensql-display-converted." + format;
       const response = await fetch("/api/workspace/exports/view", {
@@ -527,6 +567,7 @@
   async function initialize() {
     try {
       await loadPricingUnits();
+      appState.pricingUnits.items.forEach((unit) => { if (!SCALE_LABELS[unit.scale]) SCALE_LABELS[unit.scale] = (unit.label || unit.scale).replace(/^[A-Z]+\s*\/\s*/, ""); });
       state.context = await api("/pricing-context");
       $("currencyConversionHelp").textContent = "当前 pricing-context 版本 " + state.context.revision +
         "。只使用带 source 的 cny_per_unit；CNY 使用恒等汇率。";
@@ -549,6 +590,6 @@
     renderControls();
   });
 
-  window.TokenSQLConversion = { convert, convertTo, computePricing, displayPrice, rawDiscount, discountRatio, discountFold, ratioFromFold, sourceUnit, isActive, exportConverted, state, _exact: { parseDecimal, multiply, divide, decimalString, fixedDecimal } };
+  window.TokenSQLConversion = { convert, convertTo, pricingRows, computePricing, displayPrice, rawDiscount, discountRatio, discountFold, ratioFromFold, sourceUnit, isActive, exportConverted, state, _exact: { parseDecimal, multiply, divide, decimalString, fixedDecimal } };
   initialize();
 })();
