@@ -22,15 +22,15 @@
         <div class="topbar-actions">
           <span class="sync-label" id="syncLabel">正在同步…</span>
           <button class="button secondary" id="refreshButton" type="button"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg>刷新</button>
-          <button class="button primary" id="importButton" type="button"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 16V4m0 0L7 9m5-5 5 5M4 15v5h16v-5"/></svg>导入文件</button>
+          <button class="button secondary" id="supplierUpdateButton" type="button">更新供应商报价</button><button class="button primary" id="importButton" type="button"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 16V4m0 0L7 9m5-5 5 5M4 15v5h16v-5"/></svg>导入文件</button>
           <input id="filePicker" type="file" multiple hidden accept=".xlsx,.xls,.csv,.tsv,.json,.pdf,image/*">
         </div>
       </header>
 
-      <div class="content-grid">
+      <div class="mobile-panel-tabs" role="tablist" aria-label="工作区"><button id="showQuotesButton" role="tab" aria-selected="true" type="button">报价</button><button id="showChatButton" role="tab" aria-selected="false" type="button">聊天</button></div><div class="workspace-layout-actions"><button id="toggleChatButton" class="text-button" type="button">收起聊天</button><button id="resetLayoutButton" class="text-button" type="button">恢复默认布局</button></div><div class="content-grid" id="contentGrid">
         <section class="data-panel" aria-label="报价数据">
           <div class="panel-toolbar">
-            <label class="search-control"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><input id="searchInput" type="search" placeholder="搜索模型、厂商或来源…" autocomplete="off"></label>
+            <label class="search-control"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><input id="searchInput" type="search" placeholder="搜索 model_id、供应商或来源…" autocomplete="off"></label>
             <div class="filters" id="filters">
               <select id="manufacturerFilter" aria-label="按模型商筛选"><option value="">全部模型商</option></select>
               <select id="providerFilter" aria-label="按供应商筛选"><option value="">全部供应商</option></select>
@@ -42,12 +42,15 @@
             <button class="icon-button" id="clearFiltersButton" type="button" title="清除筛选" aria-label="清除筛选"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17"/></svg></button>
           </div>
 
+          <div class="comparison-heading"><button id="backToOverviewButton" class="text-button" type="button" hidden>← 模型概览</button><h2 id="comparisonTitle">模型概览</h2><span id="comparisonSubtitle">各计费项分别比较供应商价</span></div>
+          <div id="scenarioToolbar" class="scenario-toolbar" hidden><label>计费场景<select id="scenarioFilter" aria-label="适用条件与计费场景"></select></label><label>排序<select id="rankingSort" aria-label="排行排序"><option value="price_asc">供应商价从低到高</option><option value="price_desc">供应商价从高到低</option><option value="discount_asc">折扣从低到高</option><option value="discount_desc">折扣从高到低</option><option value="date_desc">报价日期从新到旧</option><option value="date_asc">报价日期从旧到新</option></select></label></div>
+          <div id="officialSummary" class="official-summary" hidden></div>
           <div class="price-toolbar">
-            <button id="pricingConversionButton" class="conversion-button" type="button" aria-pressed="false">折扣 / 折后价：原始值</button>
+            <span id="pricingConversionButton" class="conversion-button calculation-status">供应商价自动计算</span>
             <button id="currencyConversionButton" class="conversion-button" type="button" aria-haspopup="dialog">币种：原币</button>
             <button id="unitConversionButton" class="conversion-button" type="button" aria-haspopup="dialog">单位：原单位</button>
-            <button id="resetConversionButton" class="text-button" type="button" hidden>恢复全部原价</button>
-            <span id="conversionSummary">两个显示换算可独立使用 · 缺合法倍率不换算</span>
+            <button id="resetConversionButton" class="text-button" type="button" hidden>恢复自动显示</button>
+            <span id="conversionSummary">同一场景比较 · 估算结果单独标识</span>
             <button id="catalogButton" class="text-button" type="button">模型目录</button><button id="contextButton" class="text-button" type="button">汇率与模型参数</button>
           </div>
           <div class="selection-bar" id="selectionBar" hidden>
@@ -57,12 +60,9 @@
             <button class="text-button" id="clearSelectionButton" type="button">取消选择</button>
           </div>
 
-          <div class="table-wrap" id="tableWrap">
+          <input id="selectAll" type="checkbox" aria-label="选择当前页全部报价" hidden><div class="table-wrap" id="tableWrap">
             <table class="data-table">
-              <thead><tr>
-                <th class="check-cell"><input id="selectAll" type="checkbox" aria-label="选择当前页全部报价"></th>
-                <th>模型 / 唯一 ID</th><th>模型商</th><th>供应商 / 标签 / 渠道 ID</th><th>计费项</th><th class="number-cell">官网价 / 单位</th><th class="number-cell">供应商价 / 单位</th><th class="number-cell">折扣 / 折后价</th><th>来源</th><th class="action-cell">操作</th>
-              </tr></thead>
+              <thead id="comparisonHead"><tr><th>model_id</th><th>输入最低供应商价</th><th>输出最低供应商价</th><th>其他计费项</th><th>操作</th></tr></thead>
               <tbody id="quoteRows"></tbody>
             </table>
             <div class="state-card" id="tableState" hidden></div>
@@ -82,6 +82,7 @@
           </footer>
         </section>
 
+        <div id="horizontalSplitter" class="layout-splitter horizontal-splitter" role="separator" tabindex="0" aria-label="调整报价和聊天宽度" aria-orientation="vertical" aria-valuemin="30" aria-valuemax="80" aria-valuenow="66"></div>
         <aside class="agent-panel" aria-labelledby="agentHeading">
           <header class="agent-header">
             <div class="agent-avatar">OC</div>
@@ -92,6 +93,8 @@
           </header>
           <div class="session-toolbar"><select id="sessionSelect" aria-label="历史会话"><option value="">新会话</option></select><button id="newSessionButton" type="button" class="text-button">新会话</button><button id="memoryButton" type="button" class="text-button">纠错记忆</button></div>
           <div class="job-strip" id="jobStrip" hidden><span id="jobStatus"></span><button id="reviewOpenButton" class="text-button" type="button" hidden>打开审核</button><button id="abortButton" class="text-button danger" type="button">中止</button></div>
+          <div id="preparedUpdateNotice" class="prepared-update-notice" hidden><span id="preparedUpdateText"></span><button id="clearPreparedUpdateButton" class="text-button" type="button">取消更新模式</button></div><details class="input-files"><summary>输入文件 <span id="inputFileCount"></span></summary><div id="inputFiles"></div></details>
+          <div class="conversation" id="conversation" aria-live="polite">
           <section id="waitingPanel" class="waiting-panel" aria-labelledby="waitingHeading" hidden>
             <h3 id="waitingHeading">等待补充</h3>
             <p id="waitingSummary"></p>
@@ -99,8 +102,7 @@
             <p id="waitingFiles" class="muted-cell"></p>
             <button id="continueUnknownButton" class="text-button" type="button">非关键未知项留空并继续</button>
           </section>
-          <details class="input-files"><summary>输入文件 <span id="inputFileCount"></span></summary><div id="inputFiles"></div></details>
-          <div class="conversation" id="conversation" aria-live="polite">
+
             <article class="message assistant">
               <div class="message-label">OPENCODE</div>
               <div class="message-body">
@@ -112,10 +114,11 @@
               </div>
             </article>
           </div>
+          <div id="verticalSplitter" class="layout-splitter vertical-splitter" role="separator" tabindex="0" aria-label="调整聊天和输入区高度" aria-orientation="horizontal" aria-valuemin="140" aria-valuemax="360" aria-valuenow="160"></div>
           <div class="composer" id="composer">
             <div class="drop-hint" id="dropHint">松开即可添加文件</div>
             <p id="composerHint" class="composer-hint" hidden></p>
-            <div class="file-chips" id="fileChips"></div>
+            <details class="composer-attachments"><summary id="attachmentSummary">附件 0</summary><div class="file-chips" id="fileChips"></div></details>
             <textarea id="promptInput" rows="3" placeholder="输入指令，或拖入 / 粘贴文件…" aria-label="给 OpenCode 的指令"></textarea>
             <div class="composer-footer">
               <div><button class="icon-button" id="attachButton" type="button" aria-label="添加文件" title="添加文件"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9 12 5.5-5.5a3 3 0 0 1 4.2 4.2l-7.8 7.8a5 5 0 0 1-7.1-7.1l7.4-7.4"/></svg></button><span class="shortcut">Enter 发送 · Shift+Enter 换行</span></div>
@@ -127,22 +130,25 @@
     </main>
   </div>
 
+  <dialog class="editor-dialog official-dialog" id="officialDialog"><header><div><p class="eyebrow">PRICE DETAILS</p><h2 id="officialDialogTitle">计费明细</h2></div><button id="closeOfficialButton" class="icon-button" type="button" aria-label="关闭详情">×</button></header><div id="officialDialogContent" class="review-content"></div></dialog>
+  <dialog class="editor-dialog" id="supplierUpdateDialog"><form id="supplierUpdateForm"><header><div><p class="eyebrow">SUPPLIER UPDATE</p><h2>更新供应商报价</h2></div><button id="closeSupplierUpdateButton" class="icon-button" type="button" aria-label="关闭供应商更新">×</button></header><div class="form-grid"><label class="wide">供应商<select id="updateSupplier" required></select></label><label class="wide">报价单系列 / 范围<input id="updateSourceScope" required placeholder="例如：直连 API 标准报价 / 国内渠道"></label><label class="wide">更新模式<select id="updateMode"><option value="incremental">增量更新：未出现的旧报价保留</option><option value="full">完整报价单替换：仅范围内缺失项列为待删</option></select></label><label class="wide">覆盖工作表（逗号分隔）<input id="updateSheets" placeholder="多工作表文件请明确覆盖哪些 sheet"></label><label class="wide">覆盖模型 ID（可空，逗号分隔）<input id="updateModels"></label><label class="wide">覆盖渠道 / 方案 ID（可空，逗号分隔）<input id="updateChannels"></label><label>来源版次<input id="updateVersion"></label><label>生效日期<input id="updateEffectiveDate" type="date"></label><label class="wide checkbox-label"><input id="updateScopeConfirmed" type="checkbox" required>我确认本次供应商及报价单范围</label><label class="wide checkbox-label"><input id="updateCompleteRead" type="checkbox">完整替换时，我确认附件完整覆盖上述范围与工作表</label><label class="wide checkbox-label"><input id="updateLatestConfirmed" type="checkbox">来源无版次或生效日期时，我确认它是当前最新报价单</label><label class="wide checkbox-label"><input id="updateAllowRollback" type="checkbox">明确允许旧版本恢复或同版不同内容</label><p id="supplierUpdateError" class="form-error wide" role="alert"></p></div><footer><button id="prepareSupplierUpdateButton" class="button primary" type="submit">选择新版文件并预审</button></footer></form></dialog>
+
   <dialog class="editor-dialog" id="editorDialog">
     <form method="dialog" id="quoteForm">
       <header><div><p class="eyebrow">PRICE RECORD</p><h2 id="editorTitle">编辑报价</h2></div><button class="icon-button" type="button" data-close-editor aria-label="关闭">×</button></header>
       <div class="form-grid">
         <label class="wide">唯一模型 ID<input name="model_id" list="modelIdentifiers" required autocomplete="off" placeholder="输入新模型 ID，或选择已有 ID"><datalist id="modelIdentifiers"></datalist><small id="editorModelInfo"></small></label>
         <label>计费项<input name="billing_item" list="billingItems" placeholder="input / output / cache"><datalist id="billingItems"><option value="input"><option value="output"><option value="cache"></datalist></label>
-        <label>供应商<input name="supplier" list="supplierNames"><datalist id="supplierNames"></datalist></label>
+        <label>供应商<input name="supplier" list="supplierNames" required placeholder="选择已有供应商或输入确认的新名称"><datalist id="supplierNames"></datalist></label>
         <label>标签（逗号分隔）<input name="tags"></label>
         <label>原供应商渠道 ID<input name="supplier_model_id"></label>
         <label>币种<select name="currency" aria-label="原始币种"><option value="CNY">人民币 CNY（默认）</option><option value="USD">美元 USD</option><option value="HKD">港币 HKD</option><option value="">未提供 / 不明确</option></select></label>
         <label>计价单位<select name="pricing_unit_id" aria-label="计价单位"></select><small>币种默认人民币；计价尺度不默认，缺失时可留空。</small></label>
-        <label data-money-field>原币供应商金额<input name="amount" inputmode="decimal"></label>
-        <label data-discount-field>源折扣（折，8.0 = 八折，12.0 = 溢价）<input name="discount_rate" inputmode="decimal" placeholder="例如 8.0"><small>以折为单位，保留一位小数，例如八折填写 8.0。</small></label>
+        <label>有效定价依据<select name="pricing_basis"><option value="">按原金额或折扣自动判定</option><option value="amount">以原金额为有效依据</option><option value="discount_rate">以原折扣为有效依据</option></select></label><label data-money-field>原币供应商金额<input name="amount" inputmode="decimal"></label>
+        <label data-discount-field>折扣（折，8.0 = 八折，12.0 = 溢价）<input name="discount_rate" inputmode="decimal" placeholder="例如 8.0"><small>以折为单位，保留一位小数，例如八折填写 8.0。</small></label>
         <div class="wide" id="quoteConditionsEditor"></div>
-        <div class="wide computed-card" id="quotePreview" aria-live="polite">源金额与源折扣可独立填写；展开适用范围后可分别计算官网计费项。</div>
-        <label>来源<input name="source"></label>
+        <div class="wide computed-card" id="quotePreview" aria-live="polite">金额或折扣均可作为定价依据；按所选场景显示一个供应商价。</div>
+        <label>报价单系列 / 范围<input name="source_scope" placeholder="定期更新使用的已确认范围"></label><label>来源条目编号<input name="source_entry_id" placeholder="真实来源编号，非行号 / 文件名"></label><label>来源<input name="source"></label>
         <label>单元格 / 来源依据<input name="source_ref"></label>
         <label class="wide">来源原文条件（JSON）<textarea name="conditions" rows="2">{}</textarea></label>
         <label class="wide">备注<textarea name="note" rows="2"></textarea></label>
@@ -191,7 +197,7 @@
   </dialog>
 
   <dialog class="editor-dialog conversion-dialog" id="unitConversionDialog">
-    <header><div><p class="eyebrow">DISPLAY UNIT</p><h2>统一显示单位</h2><p>同 token 量纲直接精确换算；秒 / 张跨量纲必须有模型参数或本次临时倍率。源折扣始终保留；启用折扣计算后，另行显示按官网反算的折扣。</p></div><button id="closeUnitConversionButton" class="icon-button" type="button" aria-label="关闭单位换算">×</button></header>
+    <header><div><p class="eyebrow">DISPLAY UNIT</p><h2>统一显示单位</h2><p>同量纲精确换算；秒 / 张跨量纲必须有模型参数或本次临时倍率，结果只用于估算比较。</p></div><button id="closeUnitConversionButton" class="icon-button" type="button" aria-label="关闭单位换算">×</button></header>
     <div class="review-content">
       <div class="conversion-options" id="unitConversionOptions" role="group" aria-label="目标显示单位"></div>
       <section class="factor-panel" id="factorPanel">
@@ -222,5 +228,7 @@
   <script src="/static/review.js" defer></script>
   <script src="/static/context.js" defer></script>
   <script src="/static/conversion.js" defer></script>
+  <script src="/static/comparison.js" defer></script>
+  <script src="/static/layout.js" defer></script>
 </body>
 </html>

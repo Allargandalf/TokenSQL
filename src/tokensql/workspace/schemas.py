@@ -39,7 +39,7 @@ class Contract(BaseModel):
         if value is None and info.field_name in {"conditions", "pricing_conditions"}:
             return {}
         nullable_business = {
-            "vendor", "model_name", "billing_item", "billing_metric", "supplier", "supplier_model_id",
+            "vendor", "model_name", "billing_item", "billing_metric", "supplier", "supplier_id", "source_scope", "source_entry_id", "source_sheet", "supplier_model_id",
             "provider_type", "amount", "discount_rate", "pricing_basis", "pricing_unit_id", "currency",
             "unit", "unit_quantity", "component_type", "conversion", "dimension", "direction",
             "effective_date", "source", "source_ref", "note", "explicit_official",
@@ -139,6 +139,10 @@ class QuoteFields(Contract):
     discount_items: list[DiscountItem] = Field(default_factory=list)
     billing_item: str | None = None
     supplier: str | None = None
+    supplier_id: str | None = Field(default=None, min_length=1, max_length=128)
+    source_scope: str | None = Field(default=None, min_length=1, max_length=255)
+    source_entry_id: str | None = Field(default=None, min_length=1, max_length=255)
+    source_sheet: str | None = Field(default=None, min_length=1, max_length=255)
     supplier_model_id: str | None = None
     tags: list[str] = Field(default_factory=list)
     provider_type: ProviderType | None = None
@@ -203,6 +207,10 @@ class QuotePatch(Contract):
     model_id: str | None = None
     billing_item: str | None = None
     supplier: str | None = None
+    supplier_id: str | None = Field(default=None, min_length=1, max_length=128)
+    source_scope: str | None = Field(default=None, min_length=1, max_length=255)
+    source_entry_id: str | None = Field(default=None, min_length=1, max_length=255)
+    source_sheet: str | None = Field(default=None, min_length=1, max_length=255)
     supplier_model_id: str | None = None
     tags: list[str] | None = None
     provider_type: ProviderType | None = None
@@ -248,6 +256,82 @@ class PricingBundle(Contract):
     create: list[QuoteCreate] = Field(default_factory=list, max_length=10000)
     update: list[QuoteUpdate] = Field(default_factory=list, max_length=10000)
     delete: list[QuoteDelete] = Field(default_factory=list, max_length=10000)
+
+
+class SupplierWrite(Contract):
+    """Explicit supplier creation, rename or alias confirmation."""
+    supplier_id: str | None = None
+    name: str
+    aliases: list[str] = Field(default_factory=list)
+    provider_type: ProviderType | None = None
+    expected_revision: int | None = Field(default=None, ge=1)
+
+    @field_validator("name")
+    @classmethod
+    def required_name(cls, value: str) -> str:
+        return _required_text(value)
+
+    @field_validator("aliases")
+    @classmethod
+    def required_aliases(cls, values: list[str]) -> list[str]:
+        return list(dict.fromkeys(_required_text(value) for value in values))
+
+
+class ReconciliationDecision(Contract):
+    entry_key: str
+    action: Literal["update", "create", "ignore"]
+    quote_id: int | None = Field(default=None, gt=0)
+    expected_revision: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def update_target(self) -> "ReconciliationDecision":
+        if self.action == "update" and (self.quote_id is None or self.expected_revision is None):
+            raise ValueError("an explicit update mapping requires quote_id and expected_revision")
+        if self.action != "update" and (self.quote_id is not None or self.expected_revision is not None):
+            raise ValueError("only update mappings accept a quote target")
+        return self
+
+
+class SupplierReconciliationRequest(Contract):
+    """A confirmed supplier/source boundary plus model-produced candidate entries."""
+    supplier_id: str
+    source_scope: str = Field(min_length=1, max_length=255)
+    mode: Literal["incremental", "full"] = "incremental"
+    scope_confirmed: bool = False
+    complete_read: bool = False
+    expected_sheets: list[str] = Field(default_factory=list)
+    covered_sheets: list[str] = Field(default_factory=list)
+    model_ids: list[str] = Field(default_factory=list)
+    supplier_model_ids: list[str] = Field(default_factory=list)
+    source_version: str | None = None
+    source_effective_date: date | None = None
+    file_sha256: str = Field(pattern=r"^[a-fA-F0-9]{64}$")
+    latest_confirmed: bool = False
+    allow_rollback: bool = False
+    unresolved_items: int = Field(default=0, ge=0)
+    models: list[ModelCreate] = Field(default_factory=list, max_length=10000)
+    official_prices: list[OfficialPriceCreate] = Field(default_factory=list, max_length=20000)
+    entries: list[QuoteCreate] = Field(default_factory=list, max_length=10000)
+    decisions: list[ReconciliationDecision] = Field(default_factory=list, max_length=10000)
+    explicit_delete_ids: list[QuoteDelete] = Field(default_factory=list, max_length=10000)
+
+    @field_validator("supplier_id", "source_scope")
+    @classmethod
+    def required_scope(cls, value: str) -> str:
+        return _required_text(value)
+
+    @field_validator("expected_sheets", "covered_sheets", "model_ids", "supplier_model_ids")
+    @classmethod
+    def unique_scope_values(cls, values: list[str]) -> list[str]:
+        return list(dict.fromkeys(_required_text(value) for value in values))
+
+    @field_validator("file_sha256")
+    @classmethod
+    def lower_hash(cls, value: str) -> str:
+        return value.lower()
+
+
+ReconciliationRequest = SupplierReconciliationRequest
 
 
 # Stable alternate name for draft producers.

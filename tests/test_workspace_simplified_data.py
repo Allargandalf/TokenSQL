@@ -45,7 +45,7 @@ def test_model_id_is_only_identity_and_display_names_are_not_aliases():
         assert "physical_key" not in columns
         assert "physical_key" not in ModelCreate.model_json_schema()["properties"]
         assert store._conn.execute("SELECT count(*) FROM pricing_alias").fetchone()[0] == 0
-        store.apply_bundle({"create": [{"model_id": "automatic-new-model"}]})
+        store.apply_bundle({"create": [{"supplier": "Synthetic Supplier", "model_id": "automatic-new-model"}]})
         assert {m["model_id"] for m in store.catalog_snapshot()["models"]} == {"a", "b", "automatic-new-model"}
         assert all("physical_key" not in m for m in store.catalog_snapshot()["models"])
     finally:
@@ -105,7 +105,7 @@ def test_nullable_predecessor_migration_preserves_history_and_unrelated_constrai
         assert {"custom_model_revision", "custom_model_trigger"} <= names
         assert not {"removed_physical_index", "removed_physical_trigger"} & names
         assert store._conn.execute("SELECT revision FROM pricing_model WHERE model_id=\'old-model\'").fetchone()[0] == 4
-        created = store.apply_bundle({"create": [{"model_id": "id-only"}]})["items"][0]
+        created = store.apply_bundle({"create": [{"supplier": "Synthetic Supplier", "model_id": "id-only"}]})["items"][0]
         assert created["id"] == 1000 and created["currency"] == "CNY"
         old = store.update_quote(7, {"note": "metadata only"}, expected_revision=5)
         assert old.currency is None and old.discount_rate == Decimal("0.12")
@@ -134,8 +134,8 @@ def test_patch_and_reopen_do_not_default_or_rewrite_existing_currency(tmp_path):
     path = tmp_path / "currency.sqlite"
     store = WorkspaceStore(path)
     items = store.apply_bundle({"create": [
-        {"model_id": "usd", "pricing_unit_id": "usd_mtoken", "discount_rate": "0.123456789"},
-        {"model_id": "unknown", "currency": None}, {"model_id": "default"},
+        {"supplier": "Synthetic Supplier", "model_id": "usd", "pricing_unit_id": "usd_mtoken", "discount_rate": "0.123456789"},
+        {"supplier": "Synthetic Supplier", "model_id": "unknown", "currency": None}, {"supplier": "Synthetic Supplier", "model_id": "default"},
     ]})["items"]
     unknown = items[1]
     raw = json.loads(store._conn.execute("SELECT payload FROM pricing_quote WHERE id=?", (unknown["id"],)).fetchone()[0])
@@ -206,8 +206,8 @@ def populated_store(tmp_path):
     store = WorkspaceStore(tmp_path / "delete.sqlite")
     store.apply_bundle({"official_prices": [{"model_id": "a", "amount": "10"}],
                         "create": [{"model_id": "a", "supplier": "Supplier", "amount": "1"},
-                                   {"model_id": "b", "discount_rate": "0.15"},
-                                   {"model_id": "c", "currency": None}]})
+                                   {"supplier": "Synthetic Supplier", "model_id": "b", "discount_rate": "0.15"},
+                                   {"supplier": "Synthetic Supplier", "model_id": "c", "currency": None}]})
     try:
         yield store
     finally:
@@ -224,13 +224,13 @@ def test_bulk_delete_physically_removes_only_selected_rows_and_keeps_audit_and_c
     for name in ("models", "official_prices", "suppliers", "channels"):
         if name != "channels":
             assert store.catalog_snapshot()[name] == before[name]
-    assert store._conn.execute("SELECT count(*) FROM pricing_channel").fetchone()[0] == 1
+    assert store._conn.execute("SELECT count(*) FROM pricing_channel").fetchone()[0] == 3
     deleted = store._conn.execute("SELECT old_value,new_value FROM pricing_audit WHERE actor='bulk-ui' ORDER BY id").fetchall()
     assert [json.loads(row["old_value"])["id"] for row in deleted] == [1, 3]
     assert all(row["new_value"] is None for row in deleted)
     with pytest.raises(QuoteNotFoundError):
         store.get_quote(1)
-    next_quote = store.apply_bundle({"create": [{"model_id": "d"}]})["items"][0]
+    next_quote = store.apply_bundle({"create": [{"supplier": "Synthetic Supplier", "model_id": "d"}]})["items"][0]
     assert next_quote["id"] == 4
 
 
@@ -291,7 +291,7 @@ def test_overlapping_concurrent_batches_have_one_winner_and_rollback_loser(tmp_p
     path = tmp_path / "concurrent.sqlite"
     first, second = WorkspaceStore(path), WorkspaceStore(path)
     try:
-        first.apply_bundle({"create": [{"model_id": "a"}, {"model_id": "b"}, {"model_id": "shared"}]})
+        first.apply_bundle({"create": [{"supplier": "Synthetic Supplier", "model_id": "a"}, {"supplier": "Synthetic Supplier", "model_id": "b"}, {"supplier": "Synthetic Supplier", "model_id": "shared"}]})
         barrier = Barrier(2)
         def delete(store, own):
             barrier.wait(5)

@@ -83,7 +83,7 @@ class ScriptedSDK:
             }))
         if kind in {"draft", "both"}:
             atomic_json(directory / "proposal.json", {"bundle": action.get("bundle", {
-                "create": [{"model_id": "example-model", "discount_rate": "0.8", "currency": "USD"}],
+                "create": [{"supplier": "Synthetic Supplier", "model_id": "example-model", "discount_rate": "0.8", "currency": "USD"}],
             })})
         if kind == "timeout":
             raise httpx.ReadTimeout("synthetic timeout", request=request)
@@ -172,9 +172,9 @@ def test_multiround_same_job_session_current_answers_fresh_catalog_and_no_stale_
             job = await start_wait(manager, raw)
             old_directory = sdk.directories[0]
             # Stale same-session/run files must not satisfy the next attempt's output contract.
-            atomic_json(old_directory / "proposal.json", {"bundle": {"create": [{"model_id": "STALE_MODEL"}]}})
+            atomic_json(old_directory / "proposal.json", {"bundle": {"create": [{"supplier": "Synthetic Supplier", "model_id": "STALE_MODEL"}]}})
             atomic_json(manager.config.agent_dir / "runs" / job["id"] / "proposal.json",
-                        {"bundle": {"create": [{"model_id": "STALE_ROOT_MODEL"}]}})
+                        {"bundle": {"create": [{"supplier": "Synthetic Supplier", "model_id": "STALE_ROOT_MODEL"}]}})
             store.apply_bundle({"models": [{"model_id": "new-catalog-model"}]}, actor="acceptance-fixture")
             rules = manager.memory.read()
             manager.memory.update([{"scope": "global", "text": "LATEST_GLOBAL_PREF_SENTINEL", "enabled": True}],
@@ -194,7 +194,7 @@ def test_multiround_same_job_session_current_answers_fresh_catalog_and_no_stale_
             assert "ADMIN_BASE_INSTRUCTION" in sdk.posts[1]["system"]
             second_input = json.dumps(sdk.posts[1])
             assert "FIRST_ANSWER" in second_input and "Check missing data" in second_input
-            await resume(manager, second, "SECOND_ANSWER supplier can remain null")
+            await resume(manager, second, "SECOND_ANSWER supplier confirmed Synthetic Supplier")
             await manager.wait(job["id"])
             final = manager.workflow.get(job["id"])
             assert final["status"] == "ready" and final["attempt"] == 3
@@ -203,7 +203,7 @@ def test_multiround_same_job_session_current_answers_fresh_catalog_and_no_stale_
             assert final["bundle"]["create"][0]["discount_rate"] == "0.80"
             assert final["questions"] == [] and len(final["clarifications"]) == 2
             assert [item["prompt"] for item in final["clarifications"]] == [
-                "FIRST_ANSWER use USD and million tokens", "SECOND_ANSWER supplier can remain null"]
+                "FIRST_ANSWER use USD and million tokens", "SECOND_ANSWER supplier confirmed Synthetic Supplier"]
             assert all(path != sdk.directories[0] for path in sdk.directories[1:])
             for directory in sdk.directories:
                 copies = list((directory / "uploads").iterdir())

@@ -1,6 +1,7 @@
 """Same-origin agent, review, file and human-memory endpoints."""
 from __future__ import annotations
 
+import json
 from typing import Any
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -10,9 +11,12 @@ from .agent_routes_upload import read_uploads, _read_upload
 from .store import RevisionConflictError, IdempotencyConflictError, QuoteNotFoundError
 
 class StartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     upload_ids: list[str] = Field(default_factory=list)
     prompt: str
     conversation_id: str | None = None
+    supplier_id: str | None = None
+    update_request: dict[str, Any] | None = None
 
 class OfficialLookupRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -21,8 +25,11 @@ class OfficialLookupRequest(BaseModel):
     prompt: str = Field(default="", max_length=16000)
 
 class ProposalRequest(BaseModel):
-    expected_revision: int
-    bundle: dict[str, Any]
+    model_config = ConfigDict(extra="forbid")
+    expected_revision: int = Field(ge=1)
+    bundle: dict[str, Any] | None = None
+    reconciliation_request: dict[str, Any] | None = None
+    decisions: list[dict[str, Any]] | None = None
 
 class DraftRequest(BaseModel):
     bundle: dict[str, Any]
@@ -36,6 +43,8 @@ class RespondRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     expected_revision: int = Field(ge=1)
     prompt: str = Field(min_length=1, max_length=16000)
+    supplier_id: str | None = None
+    update_request: dict[str, Any] | None = None
 
     @field_validator("prompt")
     @classmethod
@@ -66,10 +75,15 @@ def create_agent_router(manager: OpenCodeAgentManager) -> APIRouter:
 
     @router.post("/agent/messages", status_code=202)
     async def submit_message(prompt: str = Form(...), conversation_id: str | None = Form(None),
+                             supplier_id: str | None = Form(None), update_request: str | None = Form(None),
                              files: list[UploadFile] = File(default=[])):
         uploads = await read_uploads(files, manager.config)
         try:
-            run = await manager.submit(prompt=prompt, files=uploads, conversation_id=conversation_id)
+            context = json.loads(update_request) if update_request else None
+            if context is not None and not isinstance(context, dict):
+                raise ValueError("update_request must be a JSON object")
+            run = await manager.submit(prompt=prompt, files=uploads, conversation_id=conversation_id,
+                                       supplier_id=supplier_id, update_request=context)
             return run.public_dict()
         except (ValueError, KeyError, OSError, RevisionConflictError) as error:
             raise problem(error) from None
@@ -154,14 +168,14 @@ def create_agent_router(manager: OpenCodeAgentManager) -> APIRouter:
     @router.patch("/imports/{identifier}/proposal")
     async def revise(identifier: str, payload: ProposalRequest):
         try:
-            return await workflow.revise(identifier, payload.expected_revision, payload.bundle)
+            return await workflow.revise(identifier, **payload.model_dump())
         except Exception as error:
             raise problem(error) from None
 
     @router.post("/imports/{identifier}/respond", status_code=202)
     async def respond(identifier: str, payload: RespondRequest):
         try:
-            return await workflow.respond(identifier, payload.expected_revision, payload.prompt)
+            return await workflow.respond(identifier, **payload.model_dump())
         except Exception as error:
             raise problem(error) from None
 

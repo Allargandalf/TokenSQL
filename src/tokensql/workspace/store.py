@@ -18,7 +18,9 @@ from .pricing import canonical_unit, identity_key
 from .units import canonical_price_payload, expand_price_payload
 from .conversion import quote_projection
 from .schemas import (ExchangeRate, TokenEquivalence, ModelCreate, OfficialPriceCreate,
-                      BulkQuoteDeleteRequest, PricingBundle, QuoteCreate, QuoteResponse)
+                      BulkQuoteDeleteRequest, PricingBundle, QuoteCreate, QuoteResponse,
+                      SupplierWrite, SupplierReconciliationRequest)
+from .reconciliation import build_reconciliation, canonical_json, digest, pricing_basis_issue
 
 EDITABLE_FIELDS = tuple(QuoteCreate.model_fields)
 
@@ -129,6 +131,9 @@ class WorkspaceStore:
                     self._migrate_nullable_schema()
                     self._migrate_discount_precision()
                     self._migrate_pricing_conditions()
+                    self._conn.execute('CREATE TABLE IF NOT EXISTS pricing_supplier_alias (\n                    alias_key TEXT PRIMARY KEY, alias TEXT NOT NULL,\n                    supplier_id TEXT NOT NULL REFERENCES pricing_supplier(supplier_id))')
+                    self._conn.execute('CREATE TABLE IF NOT EXISTS pricing_supplier_mapping (\n                    supplier_id TEXT NOT NULL REFERENCES pricing_supplier(supplier_id),\n                    source_scope TEXT NOT NULL, entry_key TEXT NOT NULL,\n                    quote_id INTEGER NOT NULL REFERENCES pricing_quote(id) ON DELETE CASCADE,\n                    identity_hash TEXT NOT NULL,\n                    PRIMARY KEY(supplier_id,source_scope,entry_key))')
+                    self._conn.execute('CREATE TABLE IF NOT EXISTS pricing_supplier_update (\n                    import_id TEXT PRIMARY KEY, request_hash TEXT NOT NULL,\n                    metadata TEXT NOT NULL, created_at TEXT NOT NULL)')
                     initial = self._default_context()
                     self._conn.execute("INSERT OR IGNORE INTO pricing_context VALUES (1,1,?,?)",
                                        (_json(initial), "1970-01-01T00:00:00+00:00"))
@@ -577,8 +582,118 @@ class WorkspaceStore:
             raise RevisionConflictError("multiple official scenarios; official_price_id required")
         return candidates[0] if candidates else None
 
+    @staticmethod
+    def _supplier_key(name: str) -> str:
+        # Only spelling/case whitespace normalization; punctuation is meaningful.
+        return " ".join(name.split()).casefold()
+
+    @staticmethod
+    def _confirmed_supplier_name(name: str) -> str:
+        name = " ".join(name.split())
+        if not name or name.casefold() in {
+            "unknown", "unknown supplier", "n/a", "none", "null",
+            "\u672a\u77e5", "\u672a\u77e5\u4f9b\u5e94\u5546", "\u5f85\u786e\u8ba4", "\u5f85\u8865\u5145"}:
+            raise ValueError("supplier must be a confirmed supplier name, not a placeholder")
+        return name
+
+    def list_suppliers(self) -> list[dict[str, Any]]:
+        with self._lock:
+            items = [dict(row) for row in self._conn.execute(
+                "SELECT supplier_id,name,provider_type,revision FROM pricing_supplier ORDER BY name")]
+            for item in items:
+                item["aliases"] = [row["alias"] for row in self._conn.execute(
+                    "SELECT alias FROM pricing_supplier_alias WHERE supplier_id=? ORDER BY alias",
+                    (item["supplier_id"],))]
+            return items
+
+    def _find_supplier_name(self, name: str) -> sqlite3.Row | None:
+        key = self._supplier_key(name)
+        row = self._conn.execute(
+            "SELECT s.* FROM pricing_supplier s LEFT JOIN pricing_supplier_alias a "
+            "ON a.supplier_id=s.supplier_id WHERE s.name_key=? OR a.alias_key=?", (key, key)).fetchone()
+        if row is not None:
+            return row
+        # Preserve stable IDs from older releases without their lossy punctuation key.
+        return next((row for row in self._conn.execute("SELECT * FROM pricing_supplier")
+                     if self._supplier_key(row["name"]) == key), None)
+
+    def confirm_supplier(self, request: SupplierWrite | dict, actor: str = "workspace-ui") -> dict[str, Any]:
+        request = SupplierWrite.model_validate(request)
+        name = self._confirmed_supplier_name(request.name)
+        with self._lock, self._transaction():
+            old = (self._conn.execute("SELECT * FROM pricing_supplier WHERE supplier_id=?",
+                                     (request.supplier_id,)).fetchone() if request.supplier_id else
+                   self._find_supplier_name(name))
+            if request.supplier_id and old is None:
+                raise ValueError("supplier_id was not found")
+            if old is not None and request.supplier_id and request.expected_revision != old["revision"]:
+                raise RevisionConflictError("supplier changed; refresh before renaming or confirming aliases")
+            if old is not None and request.supplier_id is None:
+                # Confirming an existing name/alias selects that identity; a rename
+                # always names its stable ID and expected revision explicitly.
+                name = old["name"]
+                existing = next(item for item in self.list_suppliers() if item["supplier_id"] == old["supplier_id"])
+                additions = {self._supplier_key(value) for value in request.aliases} - {
+                    self._supplier_key(name), *(self._supplier_key(value) for value in existing["aliases"])}
+                provider_change = request.provider_type is not None and request.provider_type != old["provider_type"]
+                if not additions and not provider_change:
+                    return existing
+                if request.expected_revision != old["revision"]:
+                    raise RevisionConflictError("supplier changed; confirm its current revision before adding aliases")
+            supplier_id = old["supplier_id"] if old is not None else "supplier-" + uuid4().hex
+            aliases = list(request.aliases)
+            if old is not None and self._supplier_key(old["name"]) != self._supplier_key(name):
+                aliases.append(old["name"])
+            for value in [name, *aliases]:
+                found = self._find_supplier_name(self._confirmed_supplier_name(value))
+                if found is not None and found["supplier_id"] != supplier_id:
+                    raise ValueError("supplier name or alias already belongs to another supplier; choose an explicit identity")
+            before = next((item for item in self.list_suppliers() if item["supplier_id"] == supplier_id), None)
+            if old is None:
+                self._conn.execute(
+                    "INSERT INTO pricing_supplier(supplier_id,name,name_key,provider_type) VALUES (?,?,?,?)",
+                    (supplier_id, name, self._supplier_key(name), request.provider_type or "unknown"))
+            else:
+                self._conn.execute(
+                    "UPDATE pricing_supplier SET name=?,name_key=?,provider_type=?,revision=revision+1 WHERE supplier_id=?",
+                    (name, self._supplier_key(name), request.provider_type or old["provider_type"], supplier_id))
+            for alias in aliases:
+                key = self._supplier_key(alias)
+                if key != self._supplier_key(name):
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO pricing_supplier_alias(alias_key,alias,supplier_id) VALUES (?,?,?)",
+                        (key, alias, supplier_id))
+            after = next(item for item in self.list_suppliers() if item["supplier_id"] == supplier_id)
+            self._audit("supplier", supplier_id, "added" if old is None else "updated", actor, before, after)
+            return after
+
     def _prepare_quote(self, item: QuoteCreate, *, validate: bool = True,
-                       actor: str = "manual/cli") -> tuple[dict, str | None, int | None]:
+                       actor: str = "manual/cli") -> tuple[dict, str, int]:
+        # Draft schemas allow missing supplier so a job can pause for clarification.
+        # Every formal write, including patches and direct Store calls, crosses here.
+        supplier = None
+        if item.supplier_id:
+            supplier = self._conn.execute("SELECT * FROM pricing_supplier WHERE supplier_id=?",
+                                          (item.supplier_id,)).fetchone()
+            if supplier is None:
+                raise ValueError("supplier_id must reference a confirmed supplier")
+            if item.supplier:
+                found = self._find_supplier_name(item.supplier)
+                if found is None or found["supplier_id"] != item.supplier_id:
+                    raise ValueError("supplier name conflicts with supplier_id")
+        elif item.supplier:
+            name = self._confirmed_supplier_name(item.supplier)
+            supplier = self._find_supplier_name(name)
+            if supplier is None:
+                supplier_id = "supplier-" + uuid4().hex
+                self._conn.execute(
+                    "INSERT INTO pricing_supplier(supplier_id,name,name_key,provider_type) VALUES (?,?,?,?)",
+                    (supplier_id, name, self._supplier_key(name), item.provider_type or "unknown"))
+                supplier = self._conn.execute("SELECT * FROM pricing_supplier WHERE supplier_id=?",
+                                              (supplier_id,)).fetchone()
+        if supplier is None:
+            raise ValueError("supplier is required for supplier quotes; complete the draft before confirming")
+        self._confirmed_supplier_name(supplier["name"])
         self._ensure_model(item.model_id, actor)
         data = canonical_price_payload(item.model_dump(mode="json"))
         data["pricing_conditions"] = compact_conditions(data.get("pricing_conditions"))
@@ -586,26 +701,18 @@ class WorkspaceStore:
             data["billing_metric"] = legacy_metric(item.billing_item)
         discount = normalize_discount_rate(item.discount_rate)
         data["discount_rate"] = None if discount is None else format(discount, "f")
-        if item.supplier is None:
-            return data, None, None
-        key = identity_key(item.supplier) or item.supplier.casefold()
-        supplier_id = "supplier-" + hashlib.sha256(key.encode()).hexdigest()[:20]
-        self._conn.execute(
-            "INSERT OR IGNORE INTO pricing_supplier(supplier_id,name,name_key,provider_type) VALUES (?,?,?,?)",
-            (supplier_id, item.supplier, key, item.provider_type or "unknown"),
-        )
-        supplier = self._conn.execute("SELECT * FROM pricing_supplier WHERE name_key=?", (key,)).fetchone()
+        issue = pricing_basis_issue(data, self._official_prices(item.model_id))
+        if issue and not getattr(self, "_allow_pricing_conflicts", False):
+            raise ValueError(issue["message"])
         supplier_id = supplier["supplier_id"]
-        data["supplier"] = supplier["name"]
+        data.update(supplier=supplier["name"], supplier_id=supplier_id)
         channel_key = item.supplier_model_id or ""
         self._conn.execute(
             "INSERT OR IGNORE INTO pricing_channel(supplier_id,model_id,supplier_model_id,channel_key)"
-            " VALUES (?,?,?,?)", (supplier_id, item.model_id, item.supplier_model_id, channel_key),
-        )
+            " VALUES (?,?,?,?)", (supplier_id, item.model_id, item.supplier_model_id, channel_key))
         channel = self._conn.execute(
             "SELECT channel_id FROM pricing_channel WHERE supplier_id=? AND model_id=? AND channel_key=?",
-            (supplier_id, item.model_id, channel_key),
-        ).fetchone()
+            (supplier_id, item.model_id, channel_key)).fetchone()
         return data, supplier_id, int(channel["channel_id"])
 
     def _effective_discount_rules(self, row: sqlite3.Row, official: list[dict],
@@ -624,7 +731,7 @@ class WorkspaceStore:
             value = json.loads(candidate["payload"])
             if set(value.get("tags") or []) != source_tags:
                 continue
-            if value.get("discount_rate") is None:
+            if value.get("discount_rate") is None and value.get("amount") is None:
                 continue
             applicable, _ = match_official_prices(value, official)
             rank = 0 if value.get("discount_scope") == "model" else 1
@@ -642,22 +749,38 @@ class WorkspaceStore:
             priority = max(item[0] for item in candidates)
             selected = [item for item in candidates if item[0] == priority]
             quote_ids = sorted(item[1]["id"] for item in selected)
-            rates = {format(normalize_discount_rate(item[2]["discount_rate"]), "f") for item in selected}
-            if len(rates) != 1:
+            def signature(value: dict) -> str:
+                raw = expand_price_payload(value, allow_legacy=True)
+                return _json({key: raw.get(key) for key in (
+                    "amount", "pricing_unit_id", "currency", "unit", "unit_quantity",
+                    "discount_rate", "pricing_basis")})
+            signatures = {signature(item[2]) for item in selected}
+            if len(signatures) != 1:
                 result.append({**common, "reason": "conflicting_discount_rules",
                                "candidate_quote_ids": quote_ids})
                 continue
             _, chosen, value = selected[0]
-            result.append({**common, "quote_id": chosen["id"], "discount_rate": rates.pop(),
+            discount = normalize_discount_rate(value.get("discount_rate"))
+            rate = None if discount is None else format(discount, "f")
+            result.append({**common, "quote_id": chosen["id"], "discount_rate": rate,
                 "discount_scope": value.get("discount_scope", "unknown"),
-                "reason": ("item_override" if any(item[0] == 0 for item in candidates) else "explicit_item")
+                "reason": ("item_amount_override" if value.get("amount") is not None else
+                           "item_override" if any(item[0] == 0 for item in candidates) else "explicit_item")
                           if priority else "model_default", "candidate_quote_ids": quote_ids})
         return result
 
     def _response(self, row: sqlite3.Row) -> QuoteResponse:
         raw = expand_price_payload(json.loads(row["payload"]), allow_legacy=True)
+        if row["supplier_id"] is not None:
+            supplier = self._conn.execute("SELECT name FROM pricing_supplier WHERE supplier_id=?",
+                                          (row["supplier_id"],)).fetchone()
+            if supplier:
+                raw["supplier"] = supplier["name"]
         official = self._official_prices(row["model_id"])
         data = quote_projection(raw, official, self.pricing_context(), at=self._valuation_at)
+        issue = pricing_basis_issue(raw, official)
+        if issue:
+            data["issues"].append(issue)
         data["effective_discount_rules"] = self._effective_discount_rules(row, official, data["official_prices"])
         model = json.loads(self._require_model(row["model_id"])["payload"])
         data.update(id=row["id"], model_id=row["model_id"], billing_item=row["billing_item"],
@@ -700,6 +823,8 @@ class WorkspaceStore:
         raw_row = self._conn.execute("SELECT payload FROM pricing_quote WHERE id=?", (quote_id,)).fetchone()
         original_payload = json.loads(raw_row["payload"])
         data = expand_price_payload(original_payload, allow_legacy=True)
+        if old.supplier_id and not data.get("supplier_id"):
+            data["supplier_id"] = old.supplier_id
         unit_fields = {"pricing_unit_id", "currency", "unit", "unit_quantity"}
         preserve_legacy = data.get("legacy_unit") is not None and not unit_fields.intersection(changes)
         if preserve_legacy:
@@ -716,6 +841,10 @@ class WorkspaceStore:
             data.pop("legacy_unit", None)
         if "billing_item" in changes and "billing_metric" not in changes and data.get("billing_metric") == legacy_metric(data.get("billing_item")):
             data["billing_metric"] = None
+        if "supplier" in changes and "supplier_id" not in changes:
+            data["supplier_id"] = None
+        if "supplier_id" in changes and "supplier" not in changes:
+            data["supplier"] = None
         data.update(changes)
         # Source amount and source discount are independent facts; editing either never clears the other.
         item = QuoteCreate.model_validate(data)
@@ -837,12 +966,114 @@ class WorkspaceStore:
         try:
             with self._lock:
                 self._conn.backup(clone._conn)
-                base_catalog_token = clone.catalog_token()
+                base_catalog_token = getattr(self, "_snapshot_base_catalog_token", None) or clone.catalog_token()
+            clone._allow_pricing_conflicts = True
             result = clone.apply_bundle(bundle, actor="preview")
             result["base_catalog_token"] = base_catalog_token
             return result
         finally:
             clone.close()
+
+    def preview_reconciliation(self, request: SupplierReconciliationRequest | dict) -> dict[str, Any]:
+        """Prepare one reviewable bundle without changing business data or receipts."""
+        request = SupplierReconciliationRequest.model_validate(request)
+        with self._lock:
+            snapshot = self.catalog_snapshot()
+            base = getattr(self, "_snapshot_base_catalog_token", None) or self.catalog_token()
+            review = build_reconciliation(request, snapshot)
+            if review["ready"]:
+                review["preview"] = self.preview_bundle(review["bundle"])
+                pricing_issues = [value for value in review["preview"]["issues"]
+                                  if value.get("code") == "pricing_basis_required"]
+                if pricing_issues:
+                    # An unresolved price basis makes a full parse incomplete for
+                    # absence-based deletion. Preserve only explicit deletions.
+                    missing_ids = {value["before"]["id"] for value in review["groups"]["delete"]
+                                   if value["reason"] == "missing_from_confirmed_complete_source"}
+                    if missing_ids:
+                        review["groups"]["delete"] = [
+                            value for value in review["groups"]["delete"]
+                            if value["before"]["id"] not in missing_ids]
+                        review["bundle"]["delete"] = [
+                            value for value in review["bundle"]["delete"] if value["id"] not in missing_ids]
+                        review["preview"] = self.preview_bundle(review["bundle"])
+                    review["ready"] = False
+                    review["groups"]["needs_confirmation"].extend(
+                        {"entry_key": "pricing:" + str(value["quote_id"]), "reason": "pricing_basis_required",
+                         "before": None, "after": None, "candidate_ids": [value["quote_id"]], "evidence": value}
+                        for value in pricing_issues)
+                    review["review_digest"] = digest({"semantic_review": review["review_digest"],
+                                                       "pricing_issues": pricing_issues})
+            else:
+                review["preview"] = None
+            review["base_catalog_token"] = base
+            return review
+
+    def apply_reconciliation(self, request: SupplierReconciliationRequest | dict,
+                             actor: str = "manual/cli", import_id: str | None = None, *,
+                             expected_catalog_token: str, expected_review_digest: str) -> dict[str, Any]:
+        """Reconcile again under the same write transaction as bundle, mappings and receipt."""
+        request = SupplierReconciliationRequest.model_validate(request)
+        request_hash = digest(request.model_dump(mode="json"))
+        import_id = import_id or "supplier-update:" + uuid4().hex
+        if not import_id.strip() or len(import_id) > 255:
+            raise ValueError("import_id must contain 1 to 255 characters")
+        with self._lock, self._transaction():
+            previous = self._conn.execute(
+                "SELECT * FROM pricing_supplier_update WHERE import_id=?", (import_id,)).fetchone()
+            if previous is not None:
+                if previous["request_hash"] != request_hash:
+                    raise IdempotencyConflictError("import_id already applied another supplier update")
+                receipt = self._conn.execute("SELECT result FROM pricing_import WHERE import_id=?",
+                                             (import_id,)).fetchone()
+                if receipt is None:
+                    raise RuntimeError("supplier update receipt is incomplete")
+                result = json.loads(receipt["result"])
+                result["reused"] = True
+                return result
+            if self._conn.execute("SELECT 1 FROM pricing_import WHERE import_id=?", (import_id,)).fetchone():
+                raise IdempotencyConflictError("import_id was already used for another operation")
+            if self.catalog_token() != expected_catalog_token:
+                raise RevisionConflictError("catalog changed after review; reconcile and confirm again")
+            review = build_reconciliation(request, self.catalog_snapshot())
+            if not review["ready"]:
+                reasons = sorted({value["reason"] for value in review["groups"]["needs_confirmation"]})
+                raise ValueError("supplier update requires clarification: " + ", ".join(reasons))
+            if review["review_digest"] != expected_review_digest:
+                raise RevisionConflictError("supplier update changed after review; reconcile and confirm again")
+            before_ids = {row["id"] for row in self._conn.execute("SELECT id FROM pricing_quote")}
+            result = self.apply_bundle(review["bundle"], actor, import_id,
+                                       expected_catalog_token=expected_catalog_token)
+            created_ids = [item["id"] for item in result["items"] if item["id"] not in before_ids]
+            for mapping in review["mappings"]:
+                quote_id = mapping["quote_id"]
+                if quote_id is None:
+                    quote_id = created_ids[mapping["create_index"]]
+                self._conn.execute(
+                    "INSERT INTO pricing_supplier_mapping VALUES (?,?,?,?,?) "
+                    "ON CONFLICT(supplier_id,source_scope,entry_key) DO UPDATE SET "
+                    "quote_id=excluded.quote_id,identity_hash=excluded.identity_hash",
+                    (request.supplier_id, request.source_scope, mapping["entry_key"],
+                     quote_id, mapping["identity_hash"]))
+            metadata = {key: getattr(request, key) for key in (
+                "supplier_id", "source_scope", "mode", "file_sha256", "source_version",
+                "source_effective_date", "expected_sheets", "covered_sheets", "model_ids", "supplier_model_ids",
+                "scope_confirmed", "complete_read", "latest_confirmed", "allow_rollback")}
+            metadata["source_effective_date"] = (
+                request.source_effective_date.isoformat() if request.source_effective_date else None)
+            metadata.update(semantic_digest=review["semantic_digest"], review_digest=review["review_digest"],
+                            applied_at=_utc_text(), changes=result["changes"])
+            self._conn.execute("INSERT INTO pricing_supplier_update VALUES (?,?,?,?)",
+                               (import_id, request_hash, _json(metadata), metadata["applied_at"]))
+            result["reconciliation"] = {
+                "supplier_id": request.supplier_id, "source_scope": request.source_scope,
+                "mode": request.mode, "review_digest": review["review_digest"],
+                "already_applied_file": review["already_applied_file"],
+                "counts": {key: len(values) for key, values in review["groups"].items()}}
+            result["catalog"] = self.catalog_snapshot()
+            self._conn.execute("UPDATE pricing_import SET result=? WHERE import_id=?",
+                               (_json(result), import_id))
+            return result
 
     @contextmanager
     def _read_transaction(self) -> Iterator[None]:
@@ -856,11 +1087,14 @@ class WorkspaceStore:
                 self._conn.rollback()
 
     def catalog_token(self) -> str:
-        """Optimistic precondition over raw business state, never frontend display context."""
-        with self._lock:
-            snapshot = self.catalog_snapshot()
-            snapshot.pop("pricing_context", None)
-            return hashlib.sha256(_json(snapshot).encode()).hexdigest()
+        """Hash raw catalog/reconciliation state, independent of display time/FX."""
+        with self._lock, self._read_transaction():
+            tables = ("pricing_vendor", "pricing_model", "pricing_alias", "pricing_official",
+                      "pricing_supplier", "pricing_supplier_alias", "pricing_channel", "pricing_quote",
+                      "pricing_supplier_mapping", "pricing_supplier_update")
+            state = {table: sorted([dict(row) for row in self._conn.execute("SELECT * FROM " + table)],
+                                   key=_json) for table in tables}
+            return hashlib.sha256(_json(state).encode()).hexdigest()
 
     def catalog_snapshot(self) -> dict[str, Any]:
         with self._lock, self._read_transaction(), self._valuation():
@@ -868,8 +1102,7 @@ class WorkspaceStore:
             official = [expand_price_payload(self._catalog_row(r), allow_legacy=True)
                         for r in self._conn.execute(
                 "SELECT * FROM pricing_official ORDER BY model_id,billing_item,official_price_id")]
-            suppliers = [dict(r) for r in self._conn.execute(
-                "SELECT supplier_id,name,provider_type,revision FROM pricing_supplier ORDER BY name")]
+            suppliers = self.list_suppliers()
             channels = [dict(r) for r in self._conn.execute("SELECT * FROM pricing_channel ORDER BY channel_id")]
             quotes = [self._response(r).model_dump(mode="json") for r in self._conn.execute(
                 "SELECT * FROM pricing_quote ORDER BY id")]
@@ -879,7 +1112,12 @@ class WorkspaceStore:
             for channel in channels:
                 channel["tags"] = sorted({tag for q in quotes if q["channel_id"] == channel["channel_id"]
                                            and q["status"] == "active" for tag in q["tags"]})
-            return {"models": models, "official_prices": official, "suppliers": suppliers,
+            mappings = [dict(row) for row in self._conn.execute(
+                "SELECT * FROM pricing_supplier_mapping ORDER BY supplier_id,source_scope,entry_key")]
+            receipts = [json.loads(row["metadata"]) for row in self._conn.execute(
+                "SELECT metadata FROM pricing_supplier_update ORDER BY created_at,import_id")]
+            return {"catalog_token": getattr(self, "_snapshot_base_catalog_token", None) or self.catalog_token(), "supplier_mappings": mappings, "supplier_update_receipts": receipts,
+                    "models": models, "official_prices": official, "suppliers": suppliers,
                     "pricing_context": self.pricing_context(),
                     "channels": channels, "quotes": quotes, "legacy_quote_count": legacy_count,
                     "legacy_notice": "Legacy rows are preserved and require explicit identity review"
@@ -924,8 +1162,11 @@ class WorkspaceStore:
                 result._conn.execute(
                     "INSERT INTO pricing_supplier(supplier_id,name,name_key,provider_type,revision) VALUES (?,?,?,?,?)",
                     (supplier["supplier_id"], supplier["name"],
-                     identity_key(supplier["name"]) or supplier["name"].casefold(),
+                     result._supplier_key(supplier["name"]),
                      supplier.get("provider_type") or "unknown", supplier.get("revision", 1)))
+                for alias in supplier.get("aliases", []):
+                    result._conn.execute("INSERT INTO pricing_supplier_alias VALUES (?,?,?)",
+                        (result._supplier_key(alias), alias, supplier["supplier_id"]))
             for channel in snapshot.get("channels", []):
                 result._conn.execute(
                     "INSERT INTO pricing_channel(channel_id,supplier_id,model_id,supplier_model_id,channel_key) VALUES (?,?,?,?,?)",
@@ -951,7 +1192,7 @@ class WorkspaceStore:
                         raise ValueError("trusted snapshot has supplier_id without supplier metadata")
                     result._conn.execute(
                         "INSERT OR IGNORE INTO pricing_supplier(supplier_id,name,name_key,provider_type) VALUES (?,?,?,?)",
-                        (supplier_id, name, identity_key(name) or name.casefold(), quote.get("provider_type") or "unknown"))
+                        (supplier_id, name, result._supplier_key(name), quote.get("provider_type") or "unknown"))
                 if channel_id is not None:
                     if supplier_id is None:
                         raise ValueError("trusted snapshot channel requires supplier_id")
@@ -966,9 +1207,16 @@ class WorkspaceStore:
                     (quote["id"], quote["model_id"], quote.get("billing_item"), supplier_id, channel_id, _json(raw),
                      quote.get("status", "active"), quote.get("revision", 1),
                      quote.get("created_at", _utc_text()), quote.get("updated_at", _utc_text())))
+            for mapping in snapshot.get("supplier_mappings", []):
+                result._conn.execute("INSERT INTO pricing_supplier_mapping VALUES (?,?,?,?,?)",
+                    tuple(mapping[key] for key in ("supplier_id", "source_scope", "entry_key", "quote_id", "identity_hash")))
+            for index, receipt in enumerate(snapshot.get("supplier_update_receipts", [])):
+                result._conn.execute("INSERT INTO pricing_supplier_update VALUES (?,?,?,?)",
+                    ("snapshot:" + str(index), "", _json(receipt), receipt.get("applied_at", _utc_text())))
             if result._conn.execute("PRAGMA foreign_key_check").fetchall():
                 raise ValueError("trusted snapshot has dangling entity references")
             result._conn.execute("DELETE FROM pricing_audit")
+            result._snapshot_base_catalog_token = snapshot.get("catalog_token")
             return result
         except Exception:
             result.close()

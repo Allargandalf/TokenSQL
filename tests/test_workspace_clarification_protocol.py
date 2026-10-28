@@ -48,7 +48,7 @@ def test_ask_cli_writes_only_questions_and_enforces_exclusion(tmp_path, capsys):
     with_store = WorkspaceStore(":memory:")
     atomic_json(snapshot, with_store.catalog_snapshot())
     candidate = directory / "candidate.json"
-    atomic_json(candidate, {"create": [{"model_id": "m"}]})
+    atomic_json(candidate, {"create": [{"supplier": "Synthetic Supplier", "model_id": "m"}]})
     with pytest.raises(SystemExit) as rejected:
         main(["prepare", "--catalog", str(snapshot), "--input", str(candidate),
               "--output", str(directory / "proposal.json")])

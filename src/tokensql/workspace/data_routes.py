@@ -14,12 +14,14 @@ from pydantic import ValidationError
 from .schemas import (
     BulkQuoteRequest, BulkQuoteDeleteRequest, BulkQuoteDeleteResponse, BulkWriteResponse, Contract, FilterOptions, PricingBundle,
     QuoteListResponse, QuotePatch, QuoteResponse, PricingContextUpdate, ViewExportRequest,
+    SupplierWrite, SupplierReconciliationRequest,
 )
 from .store import IdempotencyConflictError, QuoteNotFoundError, RevisionConflictError, WorkspaceStore
 from .units import pricing_units_payload
 
 EXPORT_COLUMNS = (
     "id", "model_id", "model_name", "vendor", "billing_item", "supplier_id", "supplier",
+    "source_scope", "source_entry_id", "source_sheet",
     "supplier_model_id", "tags", "provider_type", "amount", "pricing_unit_id",
     "discount_rate", "pricing_basis", "raw_discount_rate", "derived_amount",
     "converted_supplier_amount", "converted_supplier_pricing_unit_id", "conversion_status",
@@ -33,6 +35,15 @@ EXPORT_COLUMNS = (
 
 class CatalogWriteRequest(Contract):
     bundle: PricingBundle
+    actor: str = "workspace-ui"
+    import_id: str | None = None
+    expected_catalog_token: str | None = None
+
+
+class ReconciliationApplyRequest(Contract):
+    request: SupplierReconciliationRequest
+    expected_catalog_token: str
+    expected_review_digest: str
     actor: str = "workspace-ui"
     import_id: str | None = None
 
@@ -134,6 +145,33 @@ def create_data_router(store: WorkspaceStore) -> APIRouter:
     def catalog():
         return store.catalog_snapshot()
 
+    @router.get("/suppliers")
+    def suppliers():
+        return {"items": store.list_suppliers()}
+
+    @router.post("/suppliers")
+    def confirm_supplier(request: SupplierWrite):
+        try:
+            return store.confirm_supplier(request)
+        except (ValueError, RevisionConflictError) as error:
+            raise _error(error) from None
+
+    @router.post("/supplier-updates/preview")
+    def preview_supplier_update(request: SupplierReconciliationRequest):
+        try:
+            return store.preview_reconciliation(request)
+        except (ValueError, RevisionConflictError, QuoteNotFoundError) as error:
+            raise _error(error) from None
+
+    @router.post("/supplier-updates/apply")
+    def apply_supplier_update(request: ReconciliationApplyRequest):
+        try:
+            return store.apply_reconciliation(request.request, request.actor, request.import_id,
+                expected_catalog_token=request.expected_catalog_token,
+                expected_review_digest=request.expected_review_digest)
+        except (ValueError, RevisionConflictError, IdempotencyConflictError, QuoteNotFoundError) as error:
+            raise _error(error) from None
+
     @router.post("/catalog/preview")
     def preview_catalog(bundle: PricingBundle):
         try:
@@ -144,7 +182,8 @@ def create_data_router(store: WorkspaceStore) -> APIRouter:
     @router.post("/catalog")
     def write_catalog(request: CatalogWriteRequest):
         try:
-            return store.apply_bundle(request.bundle, request.actor, request.import_id)
+            return store.apply_bundle(request.bundle, request.actor, request.import_id,
+                                      expected_catalog_token=request.expected_catalog_token)
         except (ValueError, RevisionConflictError, IdempotencyConflictError, QuoteNotFoundError) as error:
             raise _error(error) from None
 

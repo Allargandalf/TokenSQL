@@ -44,14 +44,14 @@ def add(store, *prices):
 
 def test_unknown_null_is_not_all_and_existing_candidates_are_not_missing(store):
     add(store, price(), price("output"))
-    quote = store.apply_bundle({"create": [{"model_id": "m", "discount_rate": "0.70"}]})["items"][0]
+    quote = store.apply_bundle({"create": [{"supplier": "Synthetic Supplier", "model_id": "m", "discount_rate": "0.70"}]})["items"][0]
     assert quote["official_match"]["status"] == "needs_scope"
     assert len(quote["official_match"]["candidate_ids"]) == 2
     assert quote["official_price"] is None and quote["official_prices"] == []
     assert quote["discount_scope"] == "unknown" and quote["currency"] == "CNY"
-    assert store.apply_bundle({"create": [{"model_id": "no-prices"}]})["items"][0]["official_match"]["status"] == "missing"
+    assert store.apply_bundle({"create": [{"supplier": "Synthetic Supplier", "model_id": "no-prices"}]})["items"][0]["official_match"]["status"] == "missing"
     with pytest.raises(ValueError):
-        QuoteCreate.model_validate({"model_id": "m", "discount_scope": "all"})
+        QuoteCreate.model_validate({"supplier": "Synthetic Supplier", "model_id": "m", "discount_scope": "all"})
 
 
 def test_model_discount_expands_five_claude_metrics_without_mutating_raw_data(store):
@@ -77,9 +77,9 @@ def test_conditions_preserve_market_modalities_and_boolean_false(store):
     add(store, price(pricing_conditions={"market": "domestic", "input_modality": "text", "with_audio": False}),
         price(pricing_conditions={"market": "international", "input_modality": "image", "with_audio": True}))
     result = store.apply_bundle({"create": [
-        {"model_id": "m", "billing_metric": "input", "pricing_conditions": {
+        {"supplier": "Synthetic Supplier", "model_id": "m", "billing_metric": "input", "pricing_conditions": {
             "market": "domestic", "input_modality": "text", "with_audio": False}},
-        {"model_id": "m", "billing_metric": "input"}]})["items"]
+        {"supplier": "Synthetic Supplier", "model_id": "m", "billing_metric": "input"}]})["items"]
     assert result[0]["official_match"]["status"] == "matched"
     assert result[0]["official_price"]["pricing_conditions"]["with_audio"] is False
     assert result[1]["official_match"]["status"] == "ambiguous"
@@ -96,7 +96,7 @@ def test_conditions_preserve_market_modalities_and_boolean_false(store):
 def test_token_range_boundaries_are_exact(store, bounds, state, tier):
     add(store, price(note="short", pricing_conditions={"input_tokens": {"max": 200000}}),
         price(note="long", pricing_conditions={"input_tokens": {"min": 200000, "min_inclusive": False}}))
-    row = store.apply_bundle({"create": [{"model_id": "m", "billing_metric": "input",
+    row = store.apply_bundle({"create": [{"supplier": "Synthetic Supplier", "model_id": "m", "billing_metric": "input",
         "pricing_conditions": {"input_tokens": bounds}}]})["items"][0]
     assert row["official_match"]["status"] == state
     if tier:
@@ -114,12 +114,12 @@ def test_invalid_condition_ranges_and_binary_numbers_are_rejected():
 
 def test_unknown_concrete_metric_needs_conditions_even_with_one_official_candidate(store):
     add(store, price(pricing_conditions={"market": "domestic", "time_band": "busy"}))
-    missing = store.apply_bundle({"create": [{"model_id": "m", "billing_metric": "input",
+    missing = store.apply_bundle({"create": [{"supplier": "Synthetic Supplier", "model_id": "m", "billing_metric": "input",
         "discount_rate": "0.8"}]})["items"][0]
     assert missing["official_match"]["status"] == "ambiguous"
     assert missing["official_price"] is None and len(missing["official_match"]["candidate_ids"]) == 1
     assert store.apply_bundle({"create": [rule()]})["items"][0]["official_match"]["status"] == "matched"
-    explicit = store.apply_bundle({"create": [{"model_id": "m", "billing_metric": "input",
+    explicit = store.apply_bundle({"create": [{"supplier": "Synthetic Supplier", "model_id": "m", "billing_metric": "input",
         "pricing_conditions": {"market": "domestic", "time_band": "busy"}}]})["items"][0]
     assert explicit["official_match"]["status"] == "matched"
 
@@ -137,7 +137,7 @@ def test_tagged_promotions_are_isolated_even_when_supplier_and_channel_match(sto
 def test_raw_legacy_conditions_never_establish_equivalence_or_select_a_cheapest_price(store):
     add(store, price("Input text long raw label", billing_metric=None, amount="1"),
         price("Input image long raw label", billing_metric=None, amount="9"))
-    unknown = store.apply_bundle({"create": [{"model_id": "m", "billing_metric": "input"}]})["items"][0]
+    unknown = store.apply_bundle({"create": [{"supplier": "Synthetic Supplier", "model_id": "m", "billing_metric": "input"}]})["items"][0]
     assert unknown["official_match"]["status"] == "ambiguous"
     assert len(unknown["official_match"]["candidate_ids"]) == 2
     assert unknown["official_price"] is None
@@ -151,7 +151,7 @@ def test_opaque_official_conditions_are_preserved_as_distinct_scenarios(store):
     add(store, price(conditions={"tier": "raw first"}), price(conditions={"tier": "raw second"}))
     prices = store.catalog_snapshot()["official_prices"]
     assert {p["pricing_conditions"]["raw"]["tier"] for p in prices} == {"raw first", "raw second"}
-    row = store.apply_bundle({"create": [{"model_id": "m", "billing_metric": "input"}]})["items"][0]
+    row = store.apply_bundle({"create": [{"supplier": "Synthetic Supplier", "model_id": "m", "billing_metric": "input"}]})["items"][0]
     assert row["official_match"]["status"] == "ambiguous" and row["official_price"] is None
     broad = store.apply_bundle({"create": [rule()]})["items"][0]
     assert broad["official_match"]["status"] == "multiple" and len(broad["official_prices"]) == 2
@@ -161,7 +161,7 @@ def test_opaque_official_conditions_are_preserved_as_distinct_scenarios(store):
 def test_explicit_empty_conditions_keep_provenance_out_of_matching(store, explicit):
     add(store, price(conditions={"header_cell": "Sheet1!D1", "currency_cell": "Sheet1!B2"},
                      pricing_conditions=explicit))
-    row = store.apply_bundle({"create": [{"model_id": "m", "billing_metric": "input"}]})["items"][0]
+    row = store.apply_bundle({"create": [{"supplier": "Synthetic Supplier", "model_id": "m", "billing_metric": "input"}]})["items"][0]
     assert row["official_match"]["status"] == "matched"
     assert row["official_price"]["pricing_conditions"] == {}
     assert row["official_price"]["conditions"]["header_cell"] == "Sheet1!D1"
@@ -233,9 +233,9 @@ def test_item_override_and_equal_priority_conflicts_are_resolved_across_pages(st
     assert store.get_quote(baseline["id"]).discount_rate == Decimal("0.70")
 
 
-def test_supplier_channels_and_anonymous_quotes_do_not_leak_rules(store):
+def test_supplier_identities_and_channels_do_not_leak_rules(store):
     add(store, price())
-    a, b, c, d = store.apply_bundle({"create": [rule(supplier=None), rule(supplier=None, discount_rate="0.3"),
+    a, b, c, d = store.apply_bundle({"create": [rule(supplier="Supplier A"), rule(supplier="Supplier B", discount_rate="0.3"),
         rule(supplier_model_id="one"), rule(supplier_model_id="two", discount_rate="0.2")]})["items"]
     for row, expected in ((a, "0.70"), (b, "0.30"), (c, "0.70"), (d, "0.20")):
         applied = store.get_quote(row["id"]).effective_discount_rules[0]
@@ -337,7 +337,7 @@ def test_only_exact_evidenced_source_migrates_model_scope_and_raw_label_adapter_
 
 
 def test_historical_receipt_replay_is_narrow_and_immutable(store):
-    request = {"create": [{"model_id": "m", "amount": "12.12345", "discount_rate": "0.70",
+    request = {"create": [{"supplier": "Synthetic Supplier", "model_id": "m", "amount": "12.12345", "discount_rate": "0.70",
                            "conditions": {"raw": "unchanged"}}]}
     initial = store.apply_bundle(request, import_id="legacy")
     legacy = PricingBundle.model_validate(request).model_dump(mode="json")
@@ -366,7 +366,7 @@ def test_historical_receipt_replay_is_narrow_and_immutable(store):
 ])
 def test_new_units_preserve_source_values_without_token_equivalence(store, currency, scale, unit, quantity, dimension):
     identifier = f"{currency}_{scale}"
-    row = store.apply_bundle({"create": [{"model_id": "subscription", "amount": "1.234567890123456789",
+    row = store.apply_bundle({"create": [{"supplier": "Synthetic Supplier", "model_id": "subscription", "amount": "1.234567890123456789",
         "pricing_unit_id": identifier}]})["items"][0]
     assert row["amount"] == "1.234567890123456789" and row["unit"] == unit and row["unit_quantity"] == quantity
     assert PRICING_UNIT_BY_ID[identifier].dimension == dimension

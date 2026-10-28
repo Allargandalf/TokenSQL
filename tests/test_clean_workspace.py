@@ -103,7 +103,7 @@ def test_create_app_starts_with_only_empty_workspace_state(
             "status": "ok",
             "application": "tokensql-workspace",
         }
-        assert api.version == "2.2.0"
+        assert api.version == "2.3.0"
 
     assert manager.stopped
     database = workspace / "quotes.sqlite3"
@@ -154,12 +154,12 @@ def test_workspace_cli_schema_list_and_removed_legacy_command(tmp_path: Path) ->
     assert "invalid choice" in legacy_result.stderr
 
 
-def test_package_and_project_versions_are_2_2_0() -> None:
+def test_package_and_project_versions_are_2_3_0() -> None:
     project = tomllib.loads(
         (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     )
-    assert tokensql.__version__ == "2.2.0"
-    assert project["project"]["version"] == "2.2.0"
+    assert tokensql.__version__ == "2.3.0"
+    assert project["project"]["version"] == "2.3.0"
 
 
 def test_supported_entrypoints_import_without_legacy_modules() -> None:

@@ -30,7 +30,8 @@ regions or cache variants into different models. They are distinct price items/c
 Preserve original billing_item labels. Put an evidenced normalized item meaning in billing_metric.
 Record known pricing_conditions in typed fields: market/platform, input/output_modality,
 input_tokens/output_tokens with exact min/max and inclusive boundaries, mode/time_band,
-cache_ttl_seconds, resolution, with_audio/reference_video and customer_tier. Keep original
+cache_ttl_seconds, resolution, with_audio/reference_video, customer_tier and tax_status
+(included/excluded/unknown). Apply these typed conditions to supplier rules as well as official prices. Keep original
 conditions dictionaries. raw/legacy_text is reserved for unstructured conditions affecting price
 applicability, never provenance: header_cell/header_text, currency_cell/unit_cell, filenames,
 source paths, sheet/cell references and currency/unit evidence belong in source_ref, original
@@ -50,11 +51,16 @@ remain in raw fields with an issue. Simple raw amounts/discounts need no invente
 Structural schema defaults and policy refreshes are not human corrections or memory rules.
 Accepted quote rows create missing model stubs automatically, with no separate entity approval.
 Never invent official prices, suppliers, exchange rates, conversion factors, or sources.
-Only model_id is required; all other business fields may be null, including vendor, supplier,
-billing_item, amount, discount_rate, pricing_unit_id and official price. Keep identified rows even
+Supplier quotations require model_id and a confirmed supplier. supplier_id selects an existing
+supplier; a source-evidenced supplier name may be proposed for human confirmation. vendor is the
+model maker, never a supplier substitute. Ask or retain a waiting draft if supplier is missing.
+Model-only and official-price proposals do not require supplier. Other business fields may be null,
+including vendor, billing_item, amount, discount_rate, pricing_unit_id and official price. Keep identified rows even
 when metadata is unresolved. New records default omitted currency to CNY, but explicit USD/HKD,
 a foreign pricing_unit_id, and explicit null unknown currency must be preserved. This default does
 not supply a missing billing unit or scale. Tokens must not be guessed as ktoken/mtoken.
+When both observed amount and discount conflict materially, preserve both and ask the human to select
+pricing_basis=amount or discount_rate. Normal two-decimal payment-ratio rounding is not a conflict.
 Pure observed discounts are valid without amount, unit or official price. Never calculate and store
 a missing amount from a discount, or a missing discount from an amount.
 Observed discount_rate is a payment ratio stored as exactly two decimal places with ROUND_HALF_UP:
@@ -71,7 +77,7 @@ ktoken, mtoken, second, image, mtoken_hour, request or account_month. Preserve o
 mtoken_hour/request/account_month dimensions; never convert them to equivalent token prices.
 Use deterministic executable code for all arithmetic. The draft tool validates raw fields without
 deriving missing business values. Discount/official-price calculation and currency/unit conversion
-are optional frontend-only display/export views, never replacement raw values.
+are enabled read-only frontend display/export views by default, never replacement raw values.
 Cross-dimension display estimates need explicit factors and estimated markers.
 UI-only target views and temporary conversion factors must
 never be proposed for database storage or remembered as confirmed business rules.
@@ -80,6 +86,13 @@ not raw storage. Never invent them or discard identified raw quotations. Latest 
 takes precedence over conflicting older conversation or confirmed scoped rules.
 Delete proposals permanently remove selected quotations only after human confirmation; audit
 history is retained. They are not a recoverable archive operation.
+Periodic supplier updates provide raw entries for host reconciliation, never guessed update/delete IDs.
+Preserve source_scope and source_entry_id only when evidenced. Filename, row number, amount and
+discount are not quote identities. Incremental is the default; absent rows remain. Full replacement
+requires explicit confirmed source/sheet/model scope and complete reading. Missing or partially read
+sheets and unresolved identities prohibit deletion by absence. Old/duplicate files require explicit
+review; never silently roll back current prices. Human mapping and corrected interpretation may
+re-preview the same bytes. Catalog changes require a fresh reconciliation and another confirmation.
 Only a human confirmation service may write the formal pricing database.
 Do not run the production CLI or access application code, production databases, or other services.
 Write only inside the current draft run directory. Preserve all uploaded workbook bytes.

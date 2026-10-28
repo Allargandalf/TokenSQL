@@ -105,7 +105,7 @@ def test_source_amount_and_discount_are_independent_and_never_derived(store):
     rows = store.apply_bundle({"create": [
         quote(), quote(amount=None, discount_rate="1.2"),
         quote(amount=None, discount_rate="0.77777", unit_quantity="1000000"),
-        quote(discount_rate="0.7"),
+        quote(discount_rate="0.7", pricing_basis="amount"),
     ]})["items"]
     assert rows[0]["discount_rate"] is None
     assert rows[1]["amount"] is None and rows[1]["discount_rate"] == "1.20"
@@ -165,7 +165,7 @@ def test_atomic_bundle_idempotency_snapshot_and_optimistic_revisions(store):
     with pytest.raises(IdempotencyConflictError):
         store.apply_bundle({"create": [quote(amount="0.006")]}, import_id="import-a")
     q = first["items"][0]
-    updated = store.update_quote(q["id"], {"discount_rate": "1.2"}, expected_revision=1, actor="ui")
+    updated = store.update_quote(q["id"], {"discount_rate": "1.2", "pricing_basis": "amount"}, expected_revision=1, actor="ui")
     assert updated.amount == Decimal("0.008") and updated.discount_rate == Decimal("1.2") and updated.derived_amount is None
     assert updated.revision == 2
     with pytest.raises(RevisionConflictError):
@@ -202,7 +202,7 @@ def test_official_edit_recalculates_supplied_basis_and_audits(store):
     # Explicit quote edits in the same bundle use the visible pre-bundle revision.
     both = store.apply_bundle({
         "official_prices": [official(amount="30", expected_revision=2)],
-        "update": [{"id": first.id, "expected_revision": 1, "changes": {"discount_rate": "0.6"}}],
+        "update": [{"id": first.id, "expected_revision": 1, "changes": {"discount_rate": "0.6", "pricing_basis": "amount"}}],
     })
     assert store.get_quote(first.id).amount == Decimal("0.008")
     assert store.get_quote(first.id).discount_rate == Decimal("0.6")

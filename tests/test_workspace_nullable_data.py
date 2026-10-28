@@ -103,8 +103,8 @@ def test_populated_not_null_schema_migrates_without_rewriting_business_history(t
         prior = store.get_quote(7)
         assert prior.revision == 4 and prior.amount == Decimal("8") and prior.discount_rate == Decimal("0.83")
         assert prior.official_price["amount"] == "100" and prior.derived_amount is None
-        new = store.apply_bundle({"create": [{"model_id": "new-only-id"}]})["items"][0]
-        assert new["id"] == 1000 and new["supplier_id"] is None and new["vendor"] is None
+        new = store.apply_bundle({"create": [{"supplier": "Synthetic Supplier", "model_id": "new-only-id"}]})["items"][0]
+        assert new["id"] == 1000 and new["supplier_id"] is not None and new["vendor"] is None
         assert store._conn.execute("SELECT payload FROM workspace_quote WHERE id=19").fetchone()[0] == "untouched legacy"
     finally:
         store.close()
@@ -142,11 +142,14 @@ def test_schema_migration_failure_rolls_back_all_rebuilt_tables_and_history(tmp_
     {"model_id": "partial", "amount": "3", "currency": "HKD"},
     {"model_id": "both", "amount": "3", "discount_rate": "0.93", "pricing_unit_id": "usd_second"},
 ])
-def test_only_model_id_required_and_partial_units_never_guessed(record):
+def test_partial_units_preserve_unknowns_after_supplier_confirmation(record):
     store = WorkspaceStore(":memory:")
     try:
-        item = store.apply_bundle({"create": [record]})["items"][0]
-        assert item["vendor"] is None and item["supplier"] is None and item["billing_item"] is None
+        assert QuoteCreate.model_validate(record).supplier is None  # Waiting drafts may be incomplete.
+        with pytest.raises(ValueError, match="supplier"):
+            store.apply_bundle({"create": [record]})
+        item = store.apply_bundle({"create": [{**record, "supplier": "Synthetic Supplier"}]})["items"][0]
+        assert item["vendor"] is None and item["supplier"] == "Synthetic Supplier" and item["billing_item"] is None
         expected_rate = record.get("discount_rate")
         if expected_rate is not None:
             expected_rate = format(Decimal(expected_rate).quantize(Decimal("0.01")), "f")
@@ -158,13 +161,13 @@ def test_only_model_id_required_and_partial_units_never_guessed(record):
             assert item["pricing_unit_id"] is None and item["unit_quantity"] is None
             assert raw["currency"] == record.get("currency", "CNY")
             assert raw["unit"] == ("token" if record.get("unit") == "Tokens" else record.get("unit"))
-        assert store._conn.execute("SELECT count(*) FROM pricing_supplier").fetchone()[0] == 0
+        assert store._conn.execute("SELECT count(*) FROM pricing_supplier").fetchone()[0] == 1
     finally:
         store.close()
 
 
 def test_empty_business_scalars_and_null_containers_normalize_without_defaults():
-    item = QuoteCreate.model_validate({"model_id": "only-id", **{key: " " for key in (
+    item = QuoteCreate.model_validate({"supplier": "Synthetic Supplier", "model_id": "only-id", **{key: " " for key in (
         "billing_item", "supplier", "supplier_model_id", "amount", "discount_rate", "pricing_basis",
         "pricing_unit_id", "currency", "unit", "unit_quantity", "provider_type", "component_type",
         "source", "source_ref", "note", "effective_date")}, "tags": None, "conditions": None})
@@ -195,7 +198,7 @@ def test_null_billing_official_is_unique_and_never_matches_input_price():
     store = WorkspaceStore(":memory:")
     try:
         store.apply_bundle({"official_prices": [{"model_id": "x", "billing_item": "input", "amount": "10", "pricing_unit_id": "cny_mtoken"}]})
-        item = store.apply_bundle({"create": [{"model_id": "x", "discount_rate": "0.8"}]})["items"][0]
+        item = store.apply_bundle({"create": [{"supplier": "Synthetic Supplier", "model_id": "x", "discount_rate": "0.8"}]})["items"][0]
         assert item["official_price"] is None
         store.apply_bundle({"official_prices": [{"model_id": "x", "amount": "20"}]})
         unknown = store.get_quote(item["id"])
@@ -218,9 +221,13 @@ def test_null_patch_clears_fields_and_independent_raw_values_are_never_refilled(
     try:
         created = store.apply_bundle({"create": [{"model_id": "x", "amount": "5", "discount_rate": "0.8",
             "supplier": "S", "billing_item": "input", "pricing_unit_id": "cny_mtoken"}]})["items"][0]
-        item = store.update_quote(created["id"], {"pricing_unit_id": None, "supplier": None, "billing_item": None}, expected_revision=1)
+        before = store.catalog_snapshot()
+        with pytest.raises(ValueError, match="supplier"):
+            store.update_quote(created["id"], {"supplier": None}, expected_revision=1)
+        assert store.catalog_snapshot() == before
+        item = store.update_quote(created["id"], {"pricing_unit_id": None, "billing_item": None}, expected_revision=1)
         assert item.pricing_unit_id is None and item.currency is None and item.unit is None and item.unit_quantity is None
-        assert item.supplier_id is None and item.channel_id is None
+        assert item.supplier_id == created["supplier_id"] and item.channel_id == created["channel_id"]
         assert item.amount == 5 and item.discount_rate == Decimal("0.8")
         item = store.update_quote(item.id, {"amount": None, "currency": "USD", "unit": "Tokens"}, expected_revision=2)
         assert item.amount is None and item.discount_rate == Decimal("0.8")
@@ -242,10 +249,10 @@ def test_partial_api_crud_preview_and_raw_exports_keep_discount_without_unit():
     try:
         with TestClient(app) as client:
             before = store.catalog_snapshot()
-            preview = client.post("/api/workspace/quotes/preview", json={"items": [{"model_id": "Banana Pro", "discount_rate": "0.8"}]})
+            preview = client.post("/api/workspace/quotes/preview", json={"items": [{"supplier": "Synthetic Supplier", "model_id": "Banana Pro", "discount_rate": "0.8"}]})
             assert preview.status_code == 200 and preview.json()["items"][0]["pricing_unit_id"] is None
             assert store.catalog_snapshot() == before
-            created = client.post("/api/workspace/quotes", json={"items": [{"model_id": "Banana Pro", "discount_rate": "0.8"}]})
+            created = client.post("/api/workspace/quotes", json={"items": [{"supplier": "Synthetic Supplier", "model_id": "Banana Pro", "discount_rate": "0.8"}]})
             assert created.status_code == 201, created.text
             item = created.json()["items"][0]
             assert client.get("/api/workspace/quotes").json()["filter_options"]["vendors"] == []
@@ -266,7 +273,7 @@ def test_partial_api_crud_preview_and_raw_exports_keep_discount_without_unit():
 def test_legacy_unknown_unit_metadata_edit_keeps_unit_evidence():
     store = WorkspaceStore(":memory:")
     try:
-        item = store.apply_bundle({"create": [{"model_id": "x"}]})["items"][0]
+        item = store.apply_bundle({"create": [{"supplier": "Synthetic Supplier", "model_id": "x"}]})["items"][0]
         raw = {"model_id": "x", "pricing_unit_id": "future_unit", "discount_rate": "0.8"}
         store._conn.execute("UPDATE pricing_quote SET payload=? WHERE id=?", (json.dumps(raw), item["id"]))
         updated = store.update_quote(item["id"], {"note": "human correction"}, expected_revision=1)

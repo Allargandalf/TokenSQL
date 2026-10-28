@@ -5,14 +5,18 @@ alwaysApply: true
 
 Follow plan.md, AGENTS.md and docs/pricing_conditions_contract.md.
 Official stable IDs, typed conditions and explicit discount scopes preserve raw data;
-unknown is not all. Show zhe once; expand multi-item official prices without writes.
+unknown is not all. Show one supplier price and one zhe discount; expand only
+effective rules without writes. Item exceptions override model defaults; conflicts
+cannot rank as minimum. Compare identical scenarios including explicit tax basis.
 All project operations run remotely through ssh uni; never create local project
 copies or write C-drive files. Never read handoff/private handoff or cleanup
 backup business files. Do not alter shared inference or coding services.
 
 Use one unique model_id with optional display name and aliases; physical_key
 is removed. Quotes create missing models atomically, without a separate model
-approval. Other business fields may be null. New omitted currency defaults to
+approval. Supplier quotes require a confirmed supplier and model_id;
+missing suppliers may wait in drafts but cannot commit. Official/model maintenance
+does not require a supplier. Other business fields may be null. New omitted currency defaults to
 CNY; explicit foreign currencies and null remain intact. Never guess token
 scale, supplier or prices to pass schema.
 Units preserve the original 12 IDs and add mtoken_hour/request/account_month
@@ -37,8 +41,11 @@ while waiting. Real SDK/schema failures remain failures.
 cancel returns files and creates no formal prices or memory. Selected quotes
 are permanently deleted after one explicit UI confirmation, atomically with
 revision validation and audit; never auto-delete production data in tests.
-Do not restore
-removed fixed parsing pipelines. Never automatically import samples/backups.
+Periodic updates reconcile stable identity within confirmed source scope.
+Incremental mode never deletes absent rows; full replacement requires complete
+reads and scope confirmation. Preserve quote IDs, apply atomically, re-preview
+and re-confirm stale revisions. No per-update whole-DB backup.
+Do not restore removed fixed parsing pipelines. Never automatically import samples/backups.
 User-initiated official-price lookup uses a new scoped OpenCode session and
 the official-source index, fetches primary evidence, then human-reviewed writes.
 Confirmed corrections alone may become scoped memory outside the repository.

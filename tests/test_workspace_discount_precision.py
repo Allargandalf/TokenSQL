@@ -50,14 +50,14 @@ def test_invalid_and_pre_round_negative_values_are_never_accepted(source):
     with pytest.raises(ValueError):
         normalize_discount_rate(source)
     with pytest.raises(ValueError):
-        QuoteCreate.model_validate({"model_id": "x", "discount_rate": source})
+        QuoteCreate.model_validate({"supplier": "Synthetic Supplier", "model_id": "x", "discount_rate": source})
     with pytest.raises(ValueError):
         QuotePatch.model_validate({"expected_revision": 1, "discount_rate": source})
 
 
 def test_schema_patch_bundle_and_store_enforce_ratio_only_precision():
     amount = "123.45678901234567890123456789"
-    quote = QuoteCreate.model_validate({"model_id": "new", "amount": amount, "discount_rate": "0.1555"})
+    quote = QuoteCreate.model_validate({"supplier": "Synthetic Supplier", "model_id": "new", "amount": amount, "discount_rate": "0.1555"})
     assert quote.model_dump(mode="json")["discount_rate"] == "0.16"
     assert quote.model_dump(mode="json")["amount"] == amount
     patch = QuotePatch.model_validate({"expected_revision": 1, "discount_rate": "0.005"})
@@ -73,7 +73,7 @@ def test_schema_patch_bundle_and_store_enforce_ratio_only_precision():
         assert changed.model_dump(mode="json")["discount_rate"] == "0.01"
         assert str(changed.amount) == amount
         # Even trusted/constructed model instances cannot bypass the storage policy.
-        direct = QuoteCreate.model_construct(model_id="constructed", discount_rate=Decimal("0.1555"))
+        direct = QuoteCreate.model_construct(supplier="Synthetic Supplier", model_id="constructed", discount_rate=Decimal("0.1555"))
         assert store.apply_bundle({"create": [direct]})["items"][0]["discount_rate"] == "0.16"
         copied = WorkspaceStore.from_snapshot(store.catalog_snapshot())
         try:
@@ -87,7 +87,7 @@ def test_schema_patch_bundle_and_store_enforce_ratio_only_precision():
 def seed_legacy_ratios(path):
     store = WorkspaceStore(path)
     store.apply_bundle({"official_prices": [{"model_id": "x", "amount": "2.123456789"}],
-                        "create": [{"model_id": "x", "amount": "123.456789", "currency": "USD"}
+                        "create": [{"supplier": "Synthetic Supplier", "model_id": "x", "amount": "123.456789", "currency": "USD"}
                                    for _ in range(5)]}, import_id="historical")
     for quote_id, ratio in enumerate(["0.1555", "0.8", "0.00", None, "0"], start=1):
         row = store._conn.execute("SELECT payload FROM pricing_quote WHERE id=?", (quote_id,)).fetchone()
@@ -190,7 +190,7 @@ def test_api_crud_preview_csv_and_xlsx_all_return_fixed_two_without_rounding_amo
     app.include_router(create_data_router(store))
     try:
         with TestClient(app) as client:
-            payload = {"items": [{"model_id": "x", "amount": "1.23456789", "discount_rate": "0.1555"}]}
+            payload = {"items": [{"supplier": "Synthetic Supplier", "model_id": "x", "amount": "1.23456789", "discount_rate": "0.1555"}]}
             preview = client.post("/api/workspace/quotes/preview", json=payload)
             assert preview.status_code == 200 and preview.json()["items"][0]["discount_rate"] == "0.16"
             assert store.list_quotes()[1] == 0
@@ -218,7 +218,7 @@ def test_api_crud_preview_csv_and_xlsx_all_return_fixed_two_without_rounding_amo
 
 def test_cli_preview_apply_and_idempotent_replay_fixed_two(tmp_path, capsys):
     path, source = tmp_path / "cli.sqlite", tmp_path / "bundle.json"
-    source.write_text(json.dumps({"create": [{"model_id": "cli", "amount": "1.23456789", "discount_rate": "0.1555"}]}))
+    source.write_text(json.dumps({"create": [{"supplier": "Synthetic Supplier", "model_id": "cli", "amount": "1.23456789", "discount_rate": "0.1555"}]}))
     for command in ("preview", "apply"):
         args = ["--db", str(path), command, str(source)]
         if command == "apply":
@@ -233,7 +233,7 @@ def test_cli_preview_apply_and_idempotent_replay_fixed_two(tmp_path, capsys):
 
 def test_reused_receipt_output_normalized_without_rewriting_historical_receipt_or_conditions():
     store = WorkspaceStore(":memory:")
-    bundle = {"create": [{"model_id": "x", "discount_rate": "0.8"}]}
+    bundle = {"create": [{"supplier": "Synthetic Supplier", "model_id": "x", "discount_rate": "0.8"}]}
     try:
         result = store.apply_bundle(bundle, import_id="same-policy")
         result["items"][0]["discount_rate"] = result["items"][0]["raw_discount_rate"] = "0.8"
@@ -259,7 +259,7 @@ def test_old_policy_import_hash_conflict_remains_safe_and_writes_nothing(tmp_pat
 
     path = tmp_path / "cross-policy.sqlite"
     store = WorkspaceStore(path)
-    raw = {"create": [{"model_id": "x", "discount_rate": "0.1555"}]}
+    raw = {"create": [{"supplier": "Synthetic Supplier", "model_id": "x", "discount_rate": "0.1555"}]}
     store.apply_bundle(raw, import_id="legacy-policy")
     old_bundle = PricingBundle.model_validate(raw).model_dump(mode="json")
     old_bundle["create"][0]["discount_rate"] = "0.1555"

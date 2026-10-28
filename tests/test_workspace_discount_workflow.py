@@ -26,7 +26,7 @@ def setup_manager(tmp_path):
 
 
 def test_bundle_normalization_is_scoped_and_preserves_amount_and_literals():
-    original = {"create": [{"model_id": "m", "amount": "1.2345678912345", "discount_rate": "0.155",
+    original = {"create": [{"supplier": "Synthetic Supplier", "model_id": "m", "amount": "1.2345678912345", "discount_rate": "0.155",
                             "conditions": {"discount_rate": "0.155"}}],
                 "update": [{"id": 1, "expected_revision": 2, "changes": {"amount": "8.123456789", "discount_rate": "0.145"}}],
                 "official_prices": [{"model_id": "m", "amount": "12.3456789"}],
@@ -42,7 +42,7 @@ def test_bundle_normalization_is_scoped_and_preserves_amount_and_literals():
 
 def test_new_draft_prepare_and_restart_share_one_policy(tmp_path):
     manager, store = setup_manager(tmp_path)
-    bundle = {"create": [{"model_id": "m", "discount_rate": "0.155", "amount": "1.2345678912345"}]}
+    bundle = {"create": [{"supplier": "Synthetic Supplier", "model_id": "m", "discount_rate": "0.155", "amount": "1.2345678912345"}]}
     prepared = prepare(bundle, store.catalog_snapshot())
     assert prepared["bundle"]["create"][0]["discount_rate"] == "0.16"
     job = manager.workflow.create_draft(bundle)
@@ -62,12 +62,12 @@ def test_new_draft_prepare_and_restart_share_one_policy(tmp_path):
 def test_accept_and_manual_revise_normalize_before_preview(tmp_path):
     manager, store = setup_manager(tmp_path)
     job = manager.workflow._new_job("Synthetic", None, [])
-    manager.workflow.accept_proposal(job["id"], {"create": [{"model_id": "m", "discount_rate": "0.145"}]})
+    manager.workflow.accept_proposal(job["id"], {"create": [{"supplier": "Synthetic Supplier", "model_id": "m", "discount_rate": "0.145"}]})
     accepted = manager.workflow.get(job["id"])
     assert accepted["bundle"]["create"][0]["discount_rate"] == "0.15"
     assert accepted["preview"]["items"][0]["discount_rate"] == "0.15"
     revised = asyncio.run(manager.workflow.revise(job["id"], accepted["revision"],
-                        {"create": [{"model_id": "m", "discount_rate": "0.155"}]}))
+                        {"create": [{"supplier": "Synthetic Supplier", "model_id": "m", "discount_rate": "0.155"}]}))
     assert revised["bundle"]["create"][0]["discount_rate"] == "0.16"
     assert revised["preview"]["items"][0]["discount_rate"] == "0.16"
     assert revised["discount_policy_version"] == DISCOUNT_POLICY_VERSION
@@ -77,15 +77,15 @@ def test_accept_and_manual_revise_normalize_before_preview(tmp_path):
 def test_legacy_ready_normalizes_once_preserving_files_messages_and_history(tmp_path):
     manager, store = setup_manager(tmp_path)
     upload = manager.workflow.upload([AgentUpload("synthetic.xlsx", b"immutable synthetic workbook")])[0]
-    current = manager.workflow.create_draft({"create": [{"model_id": "m"}]})
+    current = manager.workflow.create_draft({"create": [{"supplier": "Synthetic Supplier", "model_id": "m"}]})
     state = deepcopy(manager.workflow.state)
     job = state["jobs"][current["id"]]
     job.pop("discount_policy_version")
     old_bundle = {"create": [
-        {"model_id": "m", "discount_rate": "0.155", "amount": "1.23456789123"},
-        {"model_id": "zero", "discount_rate": "0"},
-        {"model_id": "unknown", "discount_rate": None},
-        {"model_id": "bare"}]}
+        {"supplier": "Synthetic Supplier", "model_id": "m", "discount_rate": "0.155", "amount": "1.23456789123"},
+        {"supplier": "Synthetic Supplier", "model_id": "zero", "discount_rate": "0"},
+        {"supplier": "Synthetic Supplier", "model_id": "unknown", "discount_rate": None},
+        {"supplier": "Synthetic Supplier", "model_id": "bare"}]}
     job.update(bundle=deepcopy(old_bundle), original_bundle=deepcopy(old_bundle),
                conversation_id="ses_original", assistant_message="Source says 0.155",
                messages=[{"role": "assistant", "text": "Source says 0.155"}])
@@ -127,7 +127,7 @@ def test_legacy_ready_normalizes_once_preserving_files_messages_and_history(tmp_
 @pytest.mark.parametrize("bad", ["-0.0001", "NaN", 0.8, True])
 def test_invalid_legacy_draft_requires_manual_revision_without_crashing_or_repeating(tmp_path, bad):
     manager, store = setup_manager(tmp_path)
-    current = manager.workflow.create_draft({"create": [{"model_id": "m"}]})
+    current = manager.workflow.create_draft({"create": [{"supplier": "Synthetic Supplier", "model_id": "m"}]})
     state = deepcopy(manager.workflow.state)
     job = state["jobs"][current["id"]]
     job.pop("discount_policy_version")
@@ -146,7 +146,7 @@ def test_invalid_legacy_draft_requires_manual_revision_without_crashing_or_repea
         with pytest.raises(ValueError, match="manual revision"):
             await again.workflow.confirm(job["id"], result["revision"])
         revised = await again.workflow.revise(job["id"], result["revision"],
-                      {"create": [{"model_id": "m", "discount_rate": "0.155"}]})
+                      {"create": [{"supplier": "Synthetic Supplier", "model_id": "m", "discount_rate": "0.155"}]})
         assert "discount_policy_warning" not in revised and revised["bundle"]["create"][0]["discount_rate"] == "0.16"
     asyncio.run(revise())
     assert store.catalog_snapshot()["quotes"] == []
@@ -154,14 +154,14 @@ def test_invalid_legacy_draft_requires_manual_revision_without_crashing_or_repea
 
 def test_precision_policy_only_does_not_become_human_memory(tmp_path):
     memory = AgentMemory(tmp_path / "agent")
-    memory.remember_confirmed("policy", {"create": [{"model_id": "m", "discount_rate": "0.1544"}]},
-                              {"create": [{"model_id": "m", "discount_rate": "0.15"}]}, ["synthetic.xlsx"])
+    memory.remember_confirmed("policy", {"create": [{"supplier": "Synthetic Supplier", "model_id": "m", "discount_rate": "0.1544"}]},
+                              {"create": [{"supplier": "Synthetic Supplier", "model_id": "m", "discount_rate": "0.15"}]}, ["synthetic.xlsx"])
     assert memory.read()["rules"] == []
-    memory.remember_confirmed("human", {"create": [{"model_id": "m", "discount_rate": "0.15"}]},
-                              {"create": [{"model_id": "m", "discount_rate": "0.16"}]}, ["synthetic.xlsx"])
+    memory.remember_confirmed("human", {"create": [{"supplier": "Synthetic Supplier", "model_id": "m", "discount_rate": "0.15"}]},
+                              {"create": [{"supplier": "Synthetic Supplier", "model_id": "m", "discount_rate": "0.16"}]}, ["synthetic.xlsx"])
     assert len(memory.read()["rules"]) == 1
-    memory.remember_confirmed("literal", {"create": [{"model_id": "m", "conditions": {"discount_rate": "0.1544"}}]},
-                              {"create": [{"model_id": "m", "conditions": {"discount_rate": "0.15"}}]}, ["synthetic.xlsx"])
+    memory.remember_confirmed("literal", {"create": [{"supplier": "Synthetic Supplier", "model_id": "m", "conditions": {"discount_rate": "0.1544"}}]},
+                              {"create": [{"supplier": "Synthetic Supplier", "model_id": "m", "conditions": {"discount_rate": "0.15"}}]}, ["synthetic.xlsx"])
     assert len(memory.read()["rules"]) == 2
     memory.remember_confirmed("update-policy", {"update": [{"id": 1, "changes": {"discount_rate": "0.1544"}}]},
                               {"update": [{"id": 1, "changes": {"discount_rate": "0.15"}}]}, ["synthetic.xlsx"])
@@ -182,7 +182,7 @@ def test_comparison_uses_same_discount_policy_but_keeps_amount_precision():
 
 def test_legacy_update_ratio_normalizes_and_keeps_original_revision_guard(tmp_path):
     manager, store = setup_manager(tmp_path)
-    inserted = store.apply_bundle({"create": [{"model_id": "m", "discount_rate": "0.80"}]})["items"][0]
+    inserted = store.apply_bundle({"create": [{"supplier": "Synthetic Supplier", "model_id": "m", "discount_rate": "0.80"}]})["items"][0]
     current = manager.workflow.create_draft({"update": [{"id": inserted["id"],
                            "expected_revision": inserted["revision"], "changes": {"discount_rate": "0.16"}}]})
     state = deepcopy(manager.workflow.state)
@@ -205,7 +205,7 @@ def test_legacy_update_ratio_normalizes_and_keeps_original_revision_guard(tmp_pa
 
 def test_old_review_without_original_baseline_does_not_invent_corrections(tmp_path):
     manager, store = setup_manager(tmp_path)
-    current = manager.workflow.create_draft({"create": [{"model_id": "m"}]})
+    current = manager.workflow.create_draft({"create": [{"supplier": "Synthetic Supplier", "model_id": "m"}]})
     state = deepcopy(manager.workflow.state)
     job = state["jobs"][current["id"]]
     job.pop("discount_policy_version")
@@ -221,8 +221,8 @@ def test_old_review_without_original_baseline_does_not_invent_corrections(tmp_pa
 
 def test_catalog_drift_still_requires_new_review_under_current_precision(tmp_path):
     manager, store = setup_manager(tmp_path)
-    job = manager.workflow.create_draft({"create": [{"model_id": "m", "discount_rate": "0.155"}]})
-    store.apply_bundle({"create": [{"model_id": "independent", "amount": "9.87654321"}]})
+    job = manager.workflow.create_draft({"create": [{"supplier": "Synthetic Supplier", "model_id": "m", "discount_rate": "0.155"}]})
+    store.apply_bundle({"create": [{"supplier": "Synthetic Supplier", "model_id": "independent", "amount": "9.87654321"}]})
     async def confirm():
         from tokensql.workspace.store import RevisionConflictError
         with pytest.raises(RevisionConflictError, match="Catalog changed"):

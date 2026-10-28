@@ -1,8 +1,35 @@
 # TokenSQL 已完成事项与验收记录
 
-更新：2026-10-26（Asia/Hong_Kong）。
+更新：2026-10-28（Asia/Hong_Kong）。
 
 本文件记录已做工作和当次证据；当前待办统一见[plan.md](plan.md)。下方旧版本的行数、PID、测试数量及业务约定仅代表对应日期，不是今天的运行状态，也不覆盖最新需求。验收范围限制保留用于说明“当时验证到了哪里”，不在这里重复维护待办列表。
+
+## 已完成：模型比价、供应商更新与等待布局工程（2026-10-28）
+
+- [x] P1：供应商报价在Store/API/CLI/审核各入口强制关联供应商；可整批补齐，缺失进入等待并续用原文件/Session；官网和模型维护不要求供应商。稳定供应商ID、明确别名、来源范围/条目/渠道字段及API/Agent契约已同步。
+- [x] P2：整模规则显示全部计费项，分项例外优先；输入/输出/缓存与忙闲、市场、上下文、TTL、模态及含税条件分别表达。加入tax_status及保守未知匹配。旧库按用户要求已清空，取消存量回填，不借测试重导旧文件。
+- [x] P3：模型概览仅显示model_id，选择场景进入供应商排行；全量候选先精确计算和排序再分页，支持并列最低及同视图导出。主表仅供应商价和折扣，官网细则收进详情；金额已知但缺官网仍可比较，估算和待补条件不伪装严格最低。
+- [x] P4：等待问题进入单一聊天滚动区、紧凑状态条和常驻输入；左右/上下可拖拽、键盘调整、恢复默认及窄屏切换。保留续答/刷新/取消语义；修复取消与晚到SDK回复竞态，取消任务不会被复活。
+- [x] P5：供应商新版报价支持增量与明确范围完整替换，五组变更预览、歧义人工映射、原位增改删及跨任务文件/版本检查。报价ID保留，整批事务、回执及并发目录重审；普通更新不做每期整库备份。
+- [x] 终审修复：更新报价禁止变更既有模型元数据，仍可自动创建缺失模型；关键价格依据冲突不生成因缺失删除。模型不能自行升级删除/回滚授权。审核编辑使用proposal_bundle源条目而非对账投影，重新预审不丢更新；新建报价不会继承上次来源范围或定价依据。
+- [x] 主Agent独立最终全套：506 passed，1条既有Starlette/httpx弃用提示；git diff --check通过。单独含税8项、独立API4项和各数据/工作流新增用例已包含在全套计数，不重复累计。
+- [x] 浏览器合成接口验收8组：652候选、跨页升降序/并列最低/导出、条件隔离、分项覆盖/冲突、估算、日期与新建表单重置、等待/拖拽/窄屏；page_errors=[]。实际查看1440/1280概览、排行与等待截图。
+- [x] 浏览器实际API/SQLite/Workflow验收：上传合成XLSX，两次经审核表单修改金额及定价依据、PATCH重新预审、各一次确认；增量A改C保留，完整替换A改/B增/C删；A原ID保留revision递增，手工及其他供应商保留，29位Decimal精度不丢失，预审不写业务。SDK调用仅脚本化2次，不是真实Qwen；page_errors/api_errors均[]。
+
+- [x] 独立终审三处最后修复无Blocker/Major；主Agent重新执行全套506项及两套浏览器验收，均通过。
+- [x] 已恢复本项目服务：127.0.0.1:8765，启动PID278232；首页/health/Agent状态/quotes均HTTP200，独立OpenCode available=true、status=ready。模型/官网价/报价/供应商/导入回执仍0；启动按原配置刷新ECB参考汇率，新增1条pricing_context系统审计，不是报价回灌。未发起真实模型推理。
+
+复验命令：`.venv/bin/python -B -m pytest -q --tb=line`；`.venv/bin/python -B tools/workspace_v23_browser_smoke.py --evidence-dir /tmp/tokensql-v23-frontend-evidence`；`.venv/bin/python -B tools/workspace_v23_api_browser_smoke.py --evidence-dir /tmp/tokensql-v23-frontend-evidence`。证据为上述远程目录的result.json、api-result.json和截图，不提交Git。
+
+验收范围：全部测试写入只在隔离合成库；启动前正式模型/官网价/报价/供应商/审计/导入回执核验均0。未重新导入旧Excel、未调用真实模型解析业务文件、未做真实金标双库或coding并发压测；这些须等待新文件，列在plan，不以506测试冒充已完成。
+
+## 已完成：v2.3基线推送、旧分支清理与空库重置（2026-10-28）
+
+- [x] 当前项目保存为834b991，main及注释标签v2.3（v2.3 UI新设计）已推GitHub；未创建Release。其他三个分支的提交均包含于main后，删除本地/远程agent-workspace、pricing-review-workflow、qwen-semantic-import。
+- [x] 创建新开发分支ui-supplier-comparison；新功能与基线分开保存。
+- [x] 执行sh scripts/clean.sh --yes --no-restart：停止本项目运行实例、清空数据库与独立OpenCode会话/草案/纠错记忆。项目外备份：/home/user/luxiaofeng/TokenSQL-maintenance-backups/20261028T013907Z-reset-baaa06047a4d；不读回、不重新导入。input/progress/data中的原Excel保留。
+- [x] 只读核验模型、官网价、报价、供应商、审计、导入回执均0；定价上下文及其初始历史各1条，为默认配置，不是业务价格。
+- [x] 根据用户新要求取消存量语义整理，更新plan及项目规则。含税状态成为明确条件，unknown不视为已知等价；测试/运行验收使用隔离合成数据，等待用户新文件。
 
 ## 已完成：v2.3 UI新设计基线（2026-10-28）
 

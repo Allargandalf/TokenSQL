@@ -279,7 +279,7 @@ def test_lookup_http_contract_forbids_session_injection(tmp_path):
 def test_latest_policy_preserves_nullable_raw_business_fields(tmp_path):
     manager, _ = setup_manager(tmp_path, lambda r: httpx.Response(200, json={}))
     prompt = manager._system_prompt(Path("/run"), Path("/catalog.json"))
-    assert "Only model_id is required" in prompt
+    assert "Supplier quotations require both model_id and a confirmed supplier" in prompt
     assert "Pure raw discounts are valid" in prompt
     assert "Keep identified rows with null unresolved values" in prompt
     assert "Skip unresolved rows" not in prompt

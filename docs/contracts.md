@@ -1,20 +1,20 @@
 # 本轮协作接口约定
 
-更新：2026-10-21。当前边界由主Agent统一同步；旧physical_key已移除。本轮新增条件定价、稳定官网ID、折扣范围与多项匹配响应详见[共同契约](pricing_conditions_contract.md)，冲突时以该契约为准。
+更新：2026-10-28。当前边界由主Agent统一同步；旧physical_key已移除。本轮新增条件定价、稳定官网ID、折扣范围与多项匹配响应详见[共同契约](pricing_conditions_contract.md)，冲突时以该契约为准。
 
 ## 数据
 
-- model_id是唯一必填业务标识和模型主键，移除physical_key及其唯一约束。model_name/vendor、billing_item、supplier、金额/原折扣及单位可null，aliases用于已证实的别名映射；容器null可规范为[]/{}。系统id/revision/审计仍保留。新增报价确认时在同事务自动创建缺失模型，不必先审核实体，不能按价格拆分模型ID。
+- model_id是唯一模型主键，移除physical_key；供应商报价同时要求已确认supplier/supplier_id，缺失可暂存等待但不能正式写入。模型/官网价不要求供应商。model_name/vendor、billing_item、金额/原折扣及单位可null，aliases用于已证实的别名映射；容器null可规范为[]/{}。系统id/revision/审计仍保留。新增报价确认时在同事务自动创建缺失模型，不必先审核实体，不能按价格拆分模型ID。
 - 一个 model_id 下可有多个 billing_item（input/output/cache 等），官网价以稳定official_price_id定位，允许同模型/计费项下多个结构化条件价；billing_item原文保留。
 - 数值为Decimal字符串，可空；discount_rate单独遵循ROUND_HALF_UP两位入库与响应（0.80/0.15/0.00），null保持，不允许负值先量化成0绕过校验。amount/官网价/FX不套两位精度。旧折扣规范化先备份、事务更新revision/updated_at与raw old/new审计，重复启动无额外写；不改旧审计/import回执。单位已知时使用21项pricing_unit_id（保留原12项，增加三币种的mtoken_hour/request/account_month）并校验兼容字段冲突；未知ID不可瞎造，null ID允许。部分已知currency/unit/unit_quantity必须保留，Tokens不推断1K/1M。新增未提供币种且无完整单位ID时默认CNY；完整ID按字典决定币种，明确外币/显式null保留，Patch未提供币种不能覆盖旧值，旧库不批量回填。GET /pricing-units返回version=2、21项；新量纲不得伪换为token。
-- amount和discount_rate均为原始独立字段，可同时提供、仅折扣或均空，不通过官网价在后台补齐/覆盖或一致性拦截。response.discount_rate保持规范化后的两位原付款比例，raw_discount_rate为兼容副本；derived_amount/converted_supplier_amount不再由后台计算，normalized为空兼容对象。官网原始记录可随official_price提供。
-- bundle仍为models/official_prices/create/update/delete；update/delete保留id/expected_revision。模型/报价/官网记录只要求非空model_id；没有catalog时允许仅ID stub。QuotePatch显式null可清字段，不应复填旧单位。官网检索意图额外检查真实URL等来源证据与范围，普通缺项草案不因缺证据字段阻断。
+- amount和discount_rate均为原始独立字段，可同时提供、仅折扣或均空，不通过官网价在后台补齐/覆盖；预审前端对明显矛盾提示选择有效依据，正常两位倍率舍入不算冲突。response.discount_rate保持规范化后的两位原付款比例，raw_discount_rate为兼容副本；derived_amount/converted_supplier_amount不再由后台计算，normalized为空兼容对象。官网原始记录可随official_price提供。
+- bundle仍为models/official_prices/create/update/delete；update/delete保留id/expected_revision。模型/官网记录要求非空model_id，供应商报价另要求已确认供应商；没有catalog时允许仅ID stub。QuotePatch显式null可清字段，不应复填旧单位。官网检索意图额外检查真实URL等来源证据与范围，普通缺项草案不因缺证据字段阻断。
 - store 暴露 preview_bundle(bundle)（不写正式库）、apply_bundle(bundle, actor, import_id)（整批事务/幂等）、catalog_snapshot()；具体 Pydantic schema 由数据 Agent 首先落地并通知其它 Agent。
 - 保留 GET /api/workspace/quotes 的 items/total/filter_options，GET catalog、CRUD 和 exports。响应可保留 model_name/manufacturer/provider 兼容显示投影，但不保留旧平面表为主数据。
 
 ## 前端显示换算（2026-10-16）
 
-两个独立控制：目标币种 USD/HKD/CNY 或原币、目标基准 ktoken/mtoken/second/image 或原单位。使用精确代码即时计算；换算价与原价可对照并导出。临时factor、目标选项和导出不产生业务写、pricing_context修改或记忆。秒/token弹窗提供分辨率/FPS建议及来源问号，自定义tokens_per_second；建议必须点击选择，不默认应用于所有模型。官网价折扣/折后价也改为前端按需临时显示。raw折扣保持展示，不自动覆盖；amount报价先对齐官网单位再算倍率，折扣only可直接用官网金额×原折扣且采用官网单位（无需供应商单位）。缺官网价按钮明确提示并可发起独立联网补价。所有结果支持stateless导出，不能反填保存payload。付款倍率以两位HALF_UP显示/反算/导出（0.80×=8.0折，0.15×=1.5折）。表单折数经确定性代码除10并规范两位入库；前端反算只展示不自动成为原输入。价格计算仍用已存两位原倍率或原金额，不能把反算展示舍入再反填价格；金额/FX不被两位舍入。导出附精确分子分母与两位舍入规则。
+两个独立控制：目标币种 USD/HKD/CNY 或原币、目标基准 ktoken/mtoken/second/image 或原单位。使用精确代码即时计算；换算价与原价可对照并导出。临时factor、目标选项和导出不产生业务写、pricing_context修改或记忆。秒/token弹窗提供分辨率/FPS建议及来源问号，自定义tokens_per_second；建议必须点击选择，不默认应用于所有模型。主界面默认显示一个供应商实际支付价和一个折扣，计算仍为临时前端投影。原始输入/派生依据在详情与导出，不重复显示两套实付价；amount报价先对齐官网单位再算倍率，折扣only可直接用官网金额×原折扣且采用官网单位（无需供应商单位）。缺官网价按钮明确提示并可发起独立联网补价。所有结果支持stateless导出，不能反填保存payload。付款倍率以两位HALF_UP显示/反算/导出（0.80×=8.0折，0.15×=1.5折）。表单折数经确定性代码除10并规范两位入库；前端反算只展示不自动成为原输入。价格计算仍用已存两位原倍率或原金额，不能把反算展示舍入再反填价格；金额/FX不被两位舍入。导出附精确分子分母与两位舍入规则。
 
 GET/PUT /pricing-context 管理版本化FX与持久模型factor；POST /pricing-context/refresh-fx {expected_revision} 更新参考汇率，保留旧业务价。参考汇率非秒级交易行情。
 
@@ -53,7 +53,7 @@ POST /api/workspace/imports/{id}/cancel → 不写正式数据/记忆，丢弃�
 - 数据Agent owns schemas/store/units/conversion/pricing/cli/data_routes与对应单测，迁移不得清库。
 - 工作流 Agent owns agent.py/agent_routes.py/新 workflow.py/memory.py/draft_cli.py 及对应单测；可另开流程路由模块。
 - 前端 Agent owns static/ 与 tools/workspace_browser_smoke.py、浏览器验收脚本。
-- 主Agent owns app/config/runtime、plan/progress/AGENTS/文档、部署脚本、双库comparator及集成。后续Subagent统一继承主Agentgpt-6.1-sol ultra。
+- 主Agent owns app/config/runtime、plan/progress/AGENTS/文档、部署脚本、双库comparator及集成。主Agent Astra统筹，编码/审查Subagent使用gpt-6.1-sol ultra。
 - 所有接口同源；真实 Excel/DB/提议/记忆/日志/比较报告不进 Git，不读取 handoff/私有交接/清理备份。只用远端 ssh uni，不写本机文件。
-- 基准四份文件保留原始哈希，处理文件流允许移动但不改写工作簿；XLS 读取需要 xlrd，XLSX 用 openpyxl。模型数据抽取不是固定逐行流水线。
+- 本轮正式库已按用户要求清空，不整理存量、不重导旧原件，等待用户新文件；隔离合成数据验收不等于真实文件验收。XLS用xlrd，XLSX用openpyxl，数据抽取不是固定逐行流水线。
 - OpenCode 运行在项目外专用目录，仅拿目录快照/草案工具，不给正式数据库写路径；生产提交权在审核服务。隔离强度与限制必须如实文档化。

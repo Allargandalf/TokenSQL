@@ -6,10 +6,10 @@
   const labels = { market: "市场 / 区域", platform: "平台", input_modality: "输入模态", output_modality: "输出模态",
     input_tokens: "输入上下文 token", output_tokens: "输出 token", mode: "请求模式", time_band: "忙闲时段",
     cache_ttl_seconds: "缓存有效期（秒）", resolution: "分辨率", with_audio: "包含音频", reference_video: "参考视频",
-    customer_tier: "客户档位", legacy_text: "原文条件", raw: "其他原始条件" };
+    customer_tier: "客户档位", tax_status: "税费状态", legacy_text: "原文条件", raw: "其他原始条件" };
   const selected = new Map();
   const expanded = new Map();
-  const scopeLabel = (scope) => ({ model: "整模型全部计费项", items: "指定计费项", unknown: "适用范围待确认" }[scope] || "适用范围待确认");
+  const scopeLabel = (scope) => ({ model: "全部计费项", items: "指定计费项", unknown: "待确认范围" }[scope] || "待确认范围");
   const metricLabel = (value) => metrics.find(([key]) => key === value)?.[1] || value || "计费项未明确";
   function conditionText(conditions = {}) {
     return Object.entries(conditions || {}).filter(([, value]) => value !== null && value !== undefined && value !== "" && (typeof value !== "object" || Object.keys(value).length))
@@ -41,8 +41,8 @@
       const match = quote.official_match;
       const byId = new Map([...candidates, ...(quote.official_prices || []), ...(quote.official_price ? [quote.official_price] : [])]
         .map((price) => [price.official_price_id, price]));
-      const reasons = { discount_scope_unknown: "已有官网价，请明确源折扣适用于整模型还是指定计费项。",
-        discount_items_required: "请指定源折扣适用的计费项。", conflicting_official_scenarios: "同一条件存在多条官网价，请核对来源和条件。",
+      const reasons = { discount_scope_unknown: "已有官网价，请明确折扣适用于整模型还是指定计费项。",
+        discount_items_required: "请指定折扣适用的计费项。", conflicting_official_scenarios: "同一条件存在多条官网价，请核对来源和条件。",
         conditions_need_evidence: "适用条件尚不明确，请补充条件和依据后计算。", multiple_official_scenarios: "已有多条条件价，请明确适用条件。",
         legacy_official_metric_unclassified: "已有官网价，但原计费项尚未分类，请先审核计费项。", no_official_prices: "缺失官网价",
         no_matching_official_scenario: "当前计费项 / 条件尚无匹配官网价", explicit_model_scope: "整模型规则，官网各计费项分别适用",
@@ -102,7 +102,7 @@
     metric.addEventListener("input", () => { customMetric.parentElement.hidden = metric.value !== "__custom__"; data.billing_metric = metric.value === "__custom__" ? customMetric.value.trim() || null : metric.value || null; onChange(); });
     customMetric.addEventListener("input", () => { data.billing_metric = customMetric.value.trim() || null; onChange(); });
     if (quote) {
-      const scope = field("discount_scope", "源折扣适用范围", data.discount_scope || "unknown",
+      const scope = field("discount_scope", "折扣适用范围", data.discount_scope || "unknown",
         [["unknown", "未知 / 待确认"], ["model", "整模型全部计费项"], ["items", "仅指定计费项"]]);
       const items = node("div", { className: "discount-items" });
       const itemJson = node("textarea"); itemJson.rows = 3;
@@ -137,8 +137,8 @@
     }
     const extra = node("details", { className: "condition-extra" }, [node("summary", { text: "地区、忙闲、上下文、缓存等条件" })]);
     const extraGrid = node("div", { className: "condition-grid" }); extra.append(extraGrid); root.append(extra);
-    for (const key of ["market", "platform", "input_modality", "output_modality", "mode", "time_band", "cache_ttl_seconds", "resolution", "customer_tier", "legacy_text"]) {
-      const options = key === "time_band" ? [["", "未知 / 未注明"], ["busy", "忙时"], ["idle", "闲时"]] : null;
+    for (const key of ["market", "platform", "input_modality", "output_modality", "mode", "time_band", "cache_ttl_seconds", "resolution", "customer_tier", "tax_status", "legacy_text"]) {
+      const options = key === "tax_status" ? [["", "未注明"], ["unknown", "未知"], ["included", "含税"], ["excluded", "不含税"]] : key === "time_band" ? [["", "未知 / 未注明"], ["busy", "忙时"], ["idle", "闲时"]] : null;
       const input = field(key, labels[key], typed[key], options, extraGrid);
       input.placeholder = "未注明则留空";
       if (key === "cache_ttl_seconds") input.inputMode = "numeric";

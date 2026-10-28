@@ -13,22 +13,58 @@ from .schemas import PricingBundle
 from .workflow import normalize_bundle_discounts
 
 def prepare(bundle: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]:
-    issues = bundle.get("issues", []) if isinstance(bundle.get("issues"), list) else []
-    bundle = bundle.get("bundle", bundle)
-    # Raw amount + pricing_unit_id are never replaced with converted display prices.
-    validated = PricingBundle.model_validate(normalize_bundle_discounts(bundle)).model_dump(mode="json")
+    envelope = bundle
+    issues = envelope.get("issues", []) if isinstance(envelope.get("issues"), list) else []
+    candidate = envelope.get("bundle", envelope)
+    candidate = {key: value for key, value in candidate.items() if key in PricingBundle.model_fields}
+    # A prepared draft remains raw source candidates; derived update/delete plans
+    # are review projections and are always rebuilt against the current catalog.
+    validated = PricingBundle.model_validate(normalize_bundle_discounts(candidate)).model_dump(mode="json")
     from .store import WorkspaceStore
+    host_request = snapshot.get("supplier_update_request") or snapshot.get("update_request")
+    proposed = envelope.get("reconciliation_request") or envelope.get("reconciliation") or {}
+    if not isinstance(proposed, dict):
+        raise ValueError("reconciliation metadata must be an object")
+    reconciliation = None
+    request = None
+    if host_request or proposed:
+        request = dict(host_request or {})
+        allowed = {"covered_sheets", "complete_read", "unresolved_items",
+                   "source_version", "source_effective_date", "decisions"}
+        request.update({key: value for key, value in proposed.items() if key in allowed})
+        # Models cannot widen the human-confirmed supplier/source/deletion boundary.
+        request.update(entries=validated["create"], models=validated["models"],
+                       official_prices=validated["official_prices"])
+    missing = [index for index, item in enumerate(validated["create"])
+               if not item.get("supplier") and not item.get("supplier_id")]
+    if request and request.get("supplier_id"):
+        missing = []
     store = WorkspaceStore.from_snapshot(snapshot)
     try:
-        preview = store.preview_bundle(validated)
-        return {"bundle": validated, "preview": preview, "issues": issues[:2000]}
+        if request and request.get("supplier_id") and request.get("file_sha256") and request.get("source_scope"):
+            reconciliation = store.preview_reconciliation(request)
+            preview = reconciliation.get("preview") or {
+                "changes": {}, "issues": [], "base_catalog_token": reconciliation["base_catalog_token"]}
+        elif missing:
+            preview = {"changes": {}, "issues": [{"code": "supplier_required", "create_indices": missing}],
+                       "requires_supplier": True, "base_catalog_token": snapshot.get("catalog_token")}
+        else:
+            preview = store.preview_bundle(validated)
+        result = {"bundle": validated, "preview": preview, "issues": issues[:2000]}
+        if request is not None:
+            result["reconciliation_request"] = reconciliation["request"] if reconciliation else request
+        if reconciliation is not None:
+            result["reconciliation"] = reconciliation
+        return result
     finally:
         store.close()
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description=__doc__,
-        epilog=("Only model_id is required. Other business fields may be null; pure discounts and "
+        epilog=("Supplier quotes require model_id and a confirmed supplier/supplier_id before final apply. "
+                "A draft missing supplier may wait for clarification. Models/official prices need no supplier. "
+                "Other business fields may be null; pure discounts and "
                 "partial units are valid. Preserve original billing_item labels; use billing_metric, "
                 "typed pricing_conditions, and explicit discount_scope/discount_items only with "
                 "source evidence. Unknown scope never means all official items. Keep same-model "

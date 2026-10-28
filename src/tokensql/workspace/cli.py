@@ -11,7 +11,7 @@ from typing import Any
 
 from openpyxl import Workbook
 from .data_routes import EXPORT_COLUMNS, _export_values
-from .schemas import PricingBundle, QuoteCreate, QuoteResponse
+from .schemas import PricingBundle, QuoteCreate, QuoteResponse, SupplierWrite, SupplierReconciliationRequest
 from .store import WorkspaceStore
 from .units import pricing_units_payload
 
@@ -33,9 +33,12 @@ def _schema() -> dict[str, Any]:
     return {
         "quote": QuoteCreate.model_json_schema(),
         "bundle": PricingBundle.model_json_schema(),
+        "supplier": SupplierWrite.model_json_schema(),
+        "reconciliation": SupplierReconciliationRequest.model_json_schema(),
         "apply": {"models": [], "official_prices": [], "create": [], "update": [], "delete": []},
         "notes": [
-            "Only model_id is required; missing models are created automatically. No physical identity field.",
+            "Supplier quotes require model_id and a confirmed supplier/supplier_id; missing models are created atomically. Models/official prices do not require a supplier.",
+            "Stable supplier_id/source_scope/source_entry_id identify supplier updates; prices, file names and row numbers are never identity.",
             "New rows default omitted currency to CNY; explicit null remains unknown and unit IDs determine their own currency.",
             "Use exact Decimal strings. A complete pricing unit must be one of the 21 pricing_unit_id values returned by pricing-units.",
             "currency/unit/unit_quantity are strict compatibility input only and may not conflict with pricing_unit_id.",
@@ -85,6 +88,18 @@ def _parser() -> argparse.ArgumentParser:
     context.add_argument("input", type=Path)
     context.add_argument("--actor", default="manual/cli")
     commands.add_parser("catalog", help="read catalog, channels, quotes and preserved legacy notice")
+    commands.add_parser("supplier-list", help="list confirmed supplier identities and aliases")
+    supplier = commands.add_parser("supplier-confirm", help="confirm a supplier name, rename or aliases from JSON")
+    supplier.add_argument("input", type=Path)
+    supplier.add_argument("--actor", default="manual/cli")
+    for command in ("reconcile-preview", "reconcile-apply"):
+        operation = commands.add_parser(command, help="review/apply one scoped supplier update JSON")
+        operation.add_argument("input", type=Path)
+        operation.add_argument("--actor", default="manual/cli")
+        operation.add_argument("--import-id")
+        if command == "reconcile-apply":
+            operation.add_argument("--catalog-token", required=True)
+            operation.add_argument("--review-digest", required=True)
     for command in ("apply", "preview", "catalog-load"):
         operation = commands.add_parser(command, help="validate/apply a normalized pricing bundle")
         operation.add_argument("input", type=Path)
@@ -119,6 +134,17 @@ def main(argv: list[str] | None = None) -> int:
             value = json.loads(args.input.read_text(encoding="utf-8"))
             value.setdefault("actor", args.actor)
             _print(store.set_pricing_context(**value))
+        elif args.command == "supplier-list":
+            _print({"items": store.list_suppliers()})
+        elif args.command == "supplier-confirm":
+            _print(store.confirm_supplier(json.loads(args.input.read_text(encoding="utf-8")), args.actor))
+        elif args.command in ("reconcile-preview", "reconcile-apply"):
+            request = json.loads(args.input.read_text(encoding="utf-8"))
+            if args.command == "reconcile-preview":
+                _print(store.preview_reconciliation(request))
+            else:
+                _print(store.apply_reconciliation(request, args.actor, args.import_id,
+                    expected_catalog_token=args.catalog_token, expected_review_digest=args.review_digest))
         elif args.command == "catalog":
             _print(store.catalog_snapshot())
         elif args.command in ("apply", "preview", "catalog-load"):

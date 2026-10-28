@@ -5,7 +5,7 @@
   const state = {
     currency: null,
     scale: null,
-    pricing: false,
+    pricing: true,
     context: null,
     customFactors: new Map(),
   };
@@ -337,7 +337,7 @@
     if (price?.amount != null || !state.pricing) return price;
     return computePricing(price).derivedPrice || price;
   }
-  function isActive() { return Boolean(state.currency || state.scale || state.pricing); }
+  function isActive() { return Boolean(state.currency || state.scale || state.customFactors.size); }
 
   function optionButton(text, active, handler) {
     const button = node("button", { className: "conversion-option" + (active ? " is-active" : ""), text, type: "button" });
@@ -346,24 +346,24 @@
   }
   function renderControls() {
     const currencyOptions = $("currencyConversionOptions");
-    currencyOptions.replaceChildren(optionButton("恢复原币", state.currency === null, () => setCurrency(null)));
+    currencyOptions.replaceChildren(optionButton("自动：有汇率时统一 CNY", state.currency === null, () => setCurrency(null)));
     ["USD", "HKD", "CNY"].forEach((currency) =>
       currencyOptions.append(optionButton(currency, state.currency === currency, () => setCurrency(currency))));
     const unitOptions = $("unitConversionOptions");
-    unitOptions.replaceChildren(optionButton("恢复原单位", state.scale === null, () => setScale(null)));
+    unitOptions.replaceChildren(optionButton("自动：token 按百万", state.scale === null, () => setScale(null)));
     Object.entries(SCALE_LABELS).filter(([scale]) => appState.pricingUnits.items.some((unit) => unit.scale === scale)).forEach(([scale, label]) =>
       unitOptions.append(optionButton(label, state.scale === scale, () => setScale(scale))));
-    $("currencyConversionButton").textContent = "币种：" + (state.currency || "原币");
-    $("unitConversionButton").textContent = "单位：" + (state.scale ? SCALE_LABELS[state.scale] : "原单位");
+    $("currencyConversionButton").textContent = "币种：" + (state.currency || "自动 / CNY 优先");
+    $("unitConversionButton").textContent = "单位：" + (state.scale ? SCALE_LABELS[state.scale] : "自动 / token 按百万");
     $("currencyConversionButton").classList.toggle("is-active", Boolean(state.currency));
     $("unitConversionButton").classList.toggle("is-active", Boolean(state.scale));
-    $("pricingConversionButton").textContent = "折扣 / 折后价：" + (state.pricing ? "计算显示" : "原始值");
+    $("pricingConversionButton").textContent = "供应商价自动计算";
     $("pricingConversionButton").classList.toggle("is-active", state.pricing);
     $("pricingConversionButton").setAttribute("aria-pressed", String(state.pricing));
     $("resetConversionButton").hidden = !isActive();
     $("conversionSummary").textContent = isActive()
       ? "临时显示换算已启用 · CSV / XLSX 导出包含换算证据 · 不影响入库"
-      : "两个显示换算可独立使用 · 缺合法倍率不换算";
+      : "自动比价显示 · 原值保留在详情 · 估算不参加最低";
     const targetLabel = state.scale ? SCALE_LABELS[state.scale] : "原单位";
     $("conversionFormula").textContent = "公式：原金额 ×（原币 CNY 汇率 ÷ 目标币 CNY 汇率）×（目标数量 × 目标 tokens/单位）÷（原数量 × 原 tokens/单位）。当前目标：" + targetLabel + "。";
     renderRows();
@@ -378,7 +378,7 @@
     renderControls();
   }
   function reset() {
-    state.currency = null; state.scale = null; state.pricing = false;
+    state.currency = null; state.scale = null; state.pricing = true; state.customFactors.clear();
     renderControls();
   }
 
@@ -583,7 +583,7 @@
   $("closeCurrencyConversionButton").addEventListener("click", () => $("currencyConversionDialog").close());
   $("closeUnitConversionButton").addEventListener("click", () => $("unitConversionDialog").close());
   $("resetConversionButton").addEventListener("click", reset);
-  $("pricingConversionButton").addEventListener("click", () => { state.pricing = !state.pricing; renderControls(); });
+
   $("applyTemporaryFactorsButton").addEventListener("click", applyTemporaryFactors);
   window.addEventListener("tokensql:pricing-context", (event) => {
     state.context = event.detail;

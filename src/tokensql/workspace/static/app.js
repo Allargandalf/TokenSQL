@@ -8,6 +8,7 @@
 
   const state = {
     items: [],
+    allItems: [],
     total: 0,
     offset: 0,
     limit: PAGE_SIZE,
@@ -118,7 +119,7 @@
       ["supplier", els.provider.value],
       ["tag", els.tag.value],
       ["currency", els.currency.value],
-      ["billing_item", els.metric.value],
+
     ];
     fields.forEach(([key, value]) => {
       if (value) params.set(key, value);
@@ -181,7 +182,7 @@
     container.append(node("span", { text: price.amount == null ? "原金额未提供" : ((sourceUnit?.currency || price.currency) ? (sourceUnit?.currency || price.currency) + " " : "") + price.amount }),
       node("span", { className: "muted-cell", text: rawUnit + " · 原始单位" }));
     const display = window.TokenSQLConversion?.displayPrice(price) || price;
-    if (display !== price) container.append(node("span", { className: "display-conversion", text: "前端折后价 " + display.currency + " " + display.amount + " / " + (window.TokenSQLConversion.sourceUnit(display)?.label || "官网单位").replace(/^[A-Z]+\s*\/\s*/, "") + " · 非原始报价" }));
+    if (display !== price) container.append(node("span", { className: "display-conversion", text: "前端供应商价 " + display.currency + " " + display.amount + " / " + (window.TokenSQLConversion.sourceUnit(display)?.label || "官网单位").replace(/^[A-Z]+\s*\/\s*/, "") + " · 非原始报价" }));
     const converted = window.TokenSQLConversion?.convert(display);
     if (converted?.status === "converted") {
       container.append(node("span", { className: "display-conversion " + (converted.estimated ? "estimated" : "exact"), text: (converted.estimated ? "工程估算" : "显示换算") + " " + converted.currency + " " + converted.amount + " / " + converted.unitLabel }));
@@ -202,8 +203,8 @@
   function pricingResult(computed) {
     const result = node("div", { className: "price-display pricing-result" });
     if (computed?.derivedAmount != null) result.append(node("span", { className: "display-conversion", text:
-      "折后价 " + computed.officialUnit.currency + " " + computed.derivedAmount + " / " + computed.officialUnit.label.replace(/^[A-Z]+\s*\/\s*/, "") }));
-    if (computed?.effectiveRule?.reason === "item_override") result.append(node("span", { className: "muted-cell", text: "采用指定计费项源折扣 " + window.TokenSQLConversion.discountFold(computed.rawDiscount) + "折（报价 #" + computed.effectiveRule.quote_id + "）" }));
+      "供应商价 " + computed.officialUnit.currency + " " + computed.derivedAmount + " / " + computed.officialUnit.label.replace(/^[A-Z]+\s*\/\s*/, "") }));
+    if (computed?.effectiveRule?.reason === "item_override") result.append(node("span", { className: "muted-cell", text: "采用指定计费项折扣 " + window.TokenSQLConversion.discountFold(computed.rawDiscount) + "折（报价 #" + computed.effectiveRule.quote_id + "）" }));
     if (computed?.calculatedDiscountFold != null) result.append(node("span", { className: computed.estimated ? "estimated" : "display-conversion",
       text: (computed.estimated ? "按官网估算折扣 " : "按官网反算折扣 ") + computed.calculatedDiscountFold + "折" }));
     if (computed?.reason || computed?.discountIssue) result.append(node("span", { className: "display-conversion unavailable", text: computed.reason || computed.discountIssue }));
@@ -216,7 +217,7 @@
     const rows = conditions.displayRows(quote);
     const all = context.matched.length ? context.matched : context.candidates;
     const detailsKey = String(quote.id ?? quote.model_id) + ":" + calculation;
-    const details = node("details", { className: "official-details" }, [node("summary", { text: calculation ? "展开逐项折后价 / 折扣" : "展开官网计费项与完整条件" })]);
+    const details = node("details", { className: "official-details" }, [node("summary", { text: calculation ? "展开逐项供应商价 / 折扣" : "展开官网计费项与完整条件" })]);
     details.open = Boolean(conditions.expanded.get(detailsKey));
     details.addEventListener("toggle", () => conditions.expanded.set(detailsKey, details.open));
     if (all.length > 1) {
@@ -244,7 +245,7 @@
     const conversion = window.TokenSQLConversion;
     const raw = conversion?.rawDiscount(quote) ?? quote.raw_discount_rate ?? quote.discount_rate;
     const result = node("div", { className: "price-display pricing-result" }, [
-      node("span", { text: raw == null ? "源折扣未提供" : conversion ? "源折扣 " + conversion.discountFold(raw) + "折" : "源折扣暂不可显示" }),
+      node("span", { text: raw == null ? "折扣未提供" : conversion ? "折扣 " + conversion.discountFold(raw) + "折" : "折扣暂不可显示" }),
       node("span", { className: "muted-cell", text: window.TokenSQLConditions?.scopeLabel(quote.discount_scope) || "适用范围待确认" }),
     ]);
     if (!conversion?.state.pricing && !force) return result;
@@ -282,19 +283,20 @@
   }
 
   function renderRows() {
+    if (window.TokenSQLComparison) { window.TokenSQLComparison.render(); return; }
     els.quoteRows.replaceChildren();
     for (const quote of state.items) {
       const row = node("tr");
       row.dataset.id = String(quote.id);
       row.classList.toggle("is-selected", state.selected.has(quote.id));
-      const check = node("input", { type: "checkbox", ariaLabel: `选择 ${quote.model_name || quote.model_id}` });
+      const check = node("input", { type: "checkbox", ariaLabel: `选择 ${quote.model_id}` });
       check.checked = state.selected.has(quote.id);
       check.addEventListener("change", () => {
         check.checked ? state.selected.set(quote.id, quote.revision) : state.selected.delete(quote.id);
         updateSelection(); renderRows();
       });
       const modelCell = node("td", { className: "model-cell" }, [
-        node("span", { className: "model-name", text: quote.model_name || quote.model_id }),
+        node("span", { className: "model-name", text: quote.model_id }),
         node("span", { className: "model-version", text: quote.model_id }),
       ]);
       const supplierCell = node("td", {}, [
@@ -402,10 +404,19 @@
     const serial = ++state.querySerial;
     if (!options.quiet) setTableState("loading");
     try {
-      const payload = await api(`/quotes?${currentFilters()}`);
-      if (serial !== state.querySerial) return;
-      state.items = Array.isArray(payload.items) ? payload.items : [];
-      state.total = Number(payload.total || 0);
+      const params = currentFilters(false);
+      const items = [];
+      let payload;
+      do {
+        params.set("limit", "500"); params.set("offset", String(items.length));
+        payload = await api(`/quotes?${params}`);
+        if (serial !== state.querySerial) return;
+        items.push(...(payload.items || []));
+        if (!payload.items?.length && items.length < Number(payload.total || 0)) throw new Error("报价分页读取不完整，请刷新后重试。");
+      } while (items.length < Number(payload.total || 0));
+      state.allItems = items;
+      state.items = items.slice(state.offset, state.offset + state.limit);
+      state.total = items.length;
       applyFilterOptions(payload.filter_options || {});
       renderRows();
       updateSelection();
@@ -416,7 +427,7 @@
       els.globalHealth.title = "数据库已连接";
     } catch (error) {
       if (serial !== state.querySerial) return;
-      state.items = [];
+      state.items = []; state.allItems = [];
       renderRows();
       updatePagination();
       setTableState("error", error.message);
@@ -455,6 +466,7 @@
   }
 
   async function exportQuotes(params, displayItems = null) {
+    if (window.TokenSQLComparison) { await window.TokenSQLComparison.exportCurrent(params); return; }
     if (window.TokenSQLConversion) {
       await window.TokenSQLConversion.exportConverted(params, displayItems);
       return;
@@ -490,12 +502,13 @@
 
   let pricingEditor = null;
   function openEditor(quote = null) {
+    els.quoteForm.reset();
     state.editing = quote;
     els.editorTitle.textContent = quote ? "编辑报价" : "新增报价";
     els.formError.textContent = "";
     const modelSelect = formField("model_id");
     $("modelIdentifiers").replaceChildren(...state.catalog.models.map((model) => {
-      const option = node("option", { text: `${valueOrDash(model.vendor)} · ${model.model_name || model.model_id}` });
+      const option = node("option", { text: model.model_id });
       option.value = model.model_id;
       return option;
     }));
@@ -536,14 +549,16 @@
 
   function quoteFormItem() {
     const item = { pricing_unit_id: formField("pricing_unit_id").value || null, currency: formField("currency").value || null };
-    ["model_id", "billing_item", "supplier", "supplier_model_id", "source", "source_ref", "note"].forEach((name) => { item[name] = formField(name).value.trim(); });
+    ["model_id", "billing_item", "supplier", "supplier_model_id", "source_scope", "source_entry_id", "pricing_basis", "source", "source_ref", "note"].forEach((name) => { item[name] = formField(name).value.trim(); });
     item.amount = formField("amount").value.trim() || null;
     const discountInput = formField("discount_rate");
     const fold = discountInput.value.trim();
     item.discount_rate = fold === discountInput.dataset.initialFold && discountInput.dataset.originalRatio !== ""
       ? window.TokenSQLConversion.discountRatio(discountInput.dataset.originalRatio) : window.TokenSQLConversion.ratioFromFold(fold);
-    ["billing_item", "supplier", "supplier_model_id", "source", "source_ref", "note"].forEach((key) => { if (!item[key]) item[key] = null; });
+    ["billing_item", "supplier", "supplier_model_id", "pricing_basis", "source", "source_ref", "note"].forEach((key) => { if (!item[key]) item[key] = null; });
     if (!item.supplier_model_id) item.supplier_model_id = null;
+    const supplier = state.catalog.suppliers.find((row) => row.name === item.supplier || (row.aliases || []).includes(item.supplier));
+    if (supplier) { item.supplier_id = supplier.supplier_id; item.supplier = supplier.name; }
     item.tags = formField("tags").value.split(/[,，]/).map((value) => value.trim()).filter(Boolean);
     Object.assign(item, pricingEditor?.read() || {});
     item.conditions = JSON.parse(formField("conditions").value.trim() || "null");
@@ -560,8 +575,8 @@
     const serial = ++previewSerial;
     try {
       const item = quoteFormItem();
-      if (!item.model_id) {
-        $("quotePreview").textContent = "只需输入模型 ID；其余字段均可留空。币种默认人民币，计价尺度不猜测。";
+      if (!item.model_id || !item.supplier) {
+        $("quotePreview").textContent = "请填写 model_id 与供应商；其余元数据按来源填写，计价尺度不猜测。";
         return;
       }
       const preview = state.editing
@@ -570,8 +585,8 @@
       if (serial !== previewSerial) return;
       const projected = (preview.items || preview.create || []).find((row) => state.editing ? row.id === state.editing.id : row.model_id === item.model_id) || item;
       const displayed = { ...projected, _officialCatalog: preview.catalog?.official_prices || state.catalog.official_prices };
-      $("quotePreview").replaceChildren(node("strong", { text: "计算预览 · 原始输入独立保存" }), priceDisplay(displayed), pricingDisplay(displayed, true),
-        node("small", { text: "折后价与反算折扣仅供显示及导出。" }));
+      $("quotePreview").replaceChildren(node("strong", { text: "计算预览 · 原始输入独立保存" }), window.TokenSQLComparison ? window.TokenSQLComparison.preview(displayed) : priceDisplay(displayed),
+        node("small", { text: "供应商价与反算折扣仅供显示及导出。" }));
     } catch (error) { if (serial === previewSerial) $("quotePreview").textContent = error.message; }
   }
 
@@ -619,6 +634,7 @@
 
   function renderFileChips() {
     els.fileChips.replaceChildren();
+    if ($("attachmentSummary")) $("attachmentSummary").textContent = "附件 " + state.files.length;
     state.files.forEach((file, index) => {
       const remove = node("button", { text: "×", type: "button", ariaLabel: `移除 ${file.name}` });
       remove.addEventListener("click", () => {
@@ -861,7 +877,7 @@
     });
   });
 
-  window.TokenSQL = { state, els, $, node, api, toast, priceDisplay, pricingDisplay, officialDetails, renderRows, loadQuotes, loadCatalog, loadPricingUnits, appendMessage, appendProgress, renderToolActivity, checkAgent, addFiles, renderFileChips };
+  window.TokenSQL = { state, els, $, node, api, toast, openEditor, deleteQuote, updateSelection, updatePagination, currentFilters, formatDate, priceDisplay, pricingDisplay, officialDetails, renderRows, loadQuotes, loadCatalog, loadPricingUnits, appendMessage, appendProgress, renderToolActivity, checkAgent, addFiles, renderFileChips };
   Promise.allSettled([loadPricingUnits().catch((error) => toast(error.message, true)), loadQuotes(), loadCatalog().catch((error) => toast(error.message, true)), checkAgent()]);
   window.setInterval(checkAgent, 30000);
 })();

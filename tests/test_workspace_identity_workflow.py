@@ -28,7 +28,7 @@ def manager_for(tmp_path):
 def test_retired_field_cleanup_only_touches_known_model_structures():
     literal = "physical_key is quoted workbook data, not an instruction"
     value = {"models": [{"model_id": "m1", "physical_key": "retired", "note": literal}],
-             "create": [{"model_id": "m1", "conditions": {"physical_key": "business literal"}}],
+             "create": [{"supplier": "Synthetic Supplier", "model_id": "m1", "conditions": {"physical_key": "business literal"}}],
              "catalog": {"models": [{"model_id": "m2", "physical_key": None}]},
              "assistant_message": literal}
     result = current_model_fields(value)
@@ -41,7 +41,7 @@ def test_retired_field_cleanup_only_touches_known_model_structures():
 def test_old_ready_draft_upgrades_model_fields_and_discount_without_committing(tmp_path):
     manager, store = manager_for(tmp_path)
     old = {"models": [{"model_id": "new", "physical_key": "obsolete", "aliases": ["known-new"]}],
-           "create": [{"model_id": "new", "amount": "1.23456789", "discount_rate": "0.123456789",
+           "create": [{"supplier": "Synthetic Supplier", "model_id": "new", "amount": "1.23456789", "discount_rate": "0.123456789",
                        "conditions": {"physical_key": "source evidence"}}]}
     job = manager.workflow.create_draft(old)
     state = deepcopy(manager.workflow.state)
@@ -83,7 +83,7 @@ def test_old_ready_draft_upgrades_model_fields_and_discount_without_committing(t
 
 def test_legacy_invalid_draft_does_not_crash_workflow_start_or_auto_confirm(tmp_path):
     manager, store = manager_for(tmp_path)
-    job = manager.workflow.create_draft({"create": [{"model_id": "m1"}]})
+    job = manager.workflow.create_draft({"create": [{"supplier": "Synthetic Supplier", "model_id": "m1"}]})
     state = deepcopy(manager.workflow.state)
     state.pop("model_id_schema_version")
     record = state["jobs"][job["id"]]
@@ -99,7 +99,7 @@ def test_old_candidate_model_field_is_ignored_but_new_schema_does_not_advertise_
     from tokensql.workspace.schemas import ModelCreate
     manager, store = manager_for(tmp_path)
     result = prepare({"models": [{"model_id": "m1", "physical_key": "obsolete"}],
-                      "create": [{"model_id": "m1", "discount_rate": "0.123456789"}]},
+                      "create": [{"supplier": "Synthetic Supplier", "model_id": "m1", "discount_rate": "0.123456789"}]},
                      store.catalog_snapshot())
     assert "physical_key" not in result["bundle"]["models"][0]
     assert "physical_key" not in ModelCreate.model_json_schema()["properties"]

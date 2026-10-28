@@ -50,6 +50,7 @@ class PricingConditions(ConditionContract):
     with_audio: bool | None = Field(default=None, strict=True)
     reference_video: bool | None = Field(default=None, strict=True)
     customer_tier: str | None = None
+    tax_status: Literal["included", "excluded", "unknown"] | None = None
     legacy_text: str | None = None
     raw: dict[str, Any] = Field(default_factory=dict)
 
@@ -165,6 +166,9 @@ def conditions_match(selector: dict, scenario: dict) -> tuple[bool, bool]:
     uncertain = False
     for key, item in wanted.items():
         other = actual.get(key)
+        if key == "tax_status" and (item == "unknown" or other == "unknown"):
+            uncertain = True
+            continue
         if other is None:
             uncertain = True
         elif key in {"input_tokens", "output_tokens"}:

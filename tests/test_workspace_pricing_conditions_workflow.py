@@ -86,7 +86,7 @@ def test_schema_to_draft_review_confirm_keeps_five_prices_and_one_model_discount
 def test_unknown_scope_is_preserved_until_a_human_review_correction(tmp_path):
     manager, store = manager_for(tmp_path)
     store.apply_bundle({"official_prices": official_rows()})
-    job = manager.workflow.create_draft({"create": [{"model_id": "claude-test", "discount_rate": "0.70"}]})
+    job = manager.workflow.create_draft({"create": [{"supplier": "Synthetic Supplier", "model_id": "claude-test", "discount_rate": "0.70"}]})
     projected = job["preview"]["items"][0]
     assert projected["official_match"]["status"] == "needs_scope"
     assert len(projected["official_match"]["candidate_ids"]) == 5 and projected["official_prices"] == []
@@ -126,7 +126,7 @@ def test_scope_clarification_survives_restart_and_uses_same_session_fresh_attemp
             else:
                 assert "整个模型原厂全部计费项" in body["parts"][0]["text"]
                 atomic_json(directory / "proposal.json", {"bundle": {
-                    "create": [{"model_id": "claude-test", "discount_rate": "0.70", "discount_scope": "model",
+                    "create": [{"supplier": "Synthetic Supplier", "model_id": "claude-test", "discount_rate": "0.70", "discount_scope": "model",
                                 "source": "synthetic.xlsx", "source_ref": "Sheet1!A2:B2"}]}})
                 text = "已按明确答复准备整模折扣草案，等待审核。"
             return httpx.Response(200, json={"info": {"role": "assistant"},
@@ -169,7 +169,7 @@ def test_scope_clarification_survives_restart_and_uses_same_session_fresh_attemp
 def test_legacy_ready_policy_refresh_is_once_only_and_never_guesses_scope_or_memory(tmp_path):
     manager, store = manager_for(tmp_path)
     store.apply_bundle({"official_prices": official_rows()})
-    raw = {"create": [{"model_id": "claude-test", "discount_rate": "0.70",
+    raw = {"create": [{"supplier": "Synthetic Supplier", "model_id": "claude-test", "discount_rate": "0.70",
                         "conditions": {"tier": "source literal"}, "note": "unresolved scope"}]}
     job = manager.workflow.create_draft(raw)
     internal = manager.workflow._job(job["id"])
@@ -220,7 +220,7 @@ def test_policy_upgrade_never_rewrites_historical_or_inflight_artifacts(tmp_path
 
 def test_invalid_legacy_conditions_require_manual_revision_then_clear_warning(tmp_path):
     manager, store = manager_for(tmp_path)
-    job = manager.workflow.create_draft({"create": [{"model_id": "m"}]})
+    job = manager.workflow.create_draft({"create": [{"supplier": "Synthetic Supplier", "model_id": "m"}]})
     internal = manager.workflow._job(job["id"])
     internal.pop("pricing_policy_version")
     internal["bundle"]["create"][0]["pricing_conditions"] = {"input_tokens": {"min": 20, "max": 10}}
@@ -233,7 +233,7 @@ def test_invalid_legacy_conditions_require_manual_revision_then_clear_warning(tm
     with pytest.raises(ValueError, match="manual revision"):
         asyncio.run(restored.workflow.confirm(job["id"], upgraded["revision"]))
     revised = asyncio.run(restored.workflow.revise(job["id"], upgraded["revision"],
-                                                  {"create": [{"model_id": "m"}]}))
+                                                  {"create": [{"supplier": "Synthetic Supplier", "model_id": "m"}]}))
     assert "pricing_policy_warning" not in revised and store.catalog_snapshot()["quotes"] == []
     store.close()
 
@@ -255,7 +255,7 @@ def legacy_fingerprint(bundle):
 
 def test_old_confirming_receipt_recovers_exact_fingerprint_without_accepting_changed_semantics(tmp_path):
     manager, store = manager_for(tmp_path)
-    raw = {"create": [{"model_id": "legacy", "billing_item": "input", "discount_rate": "0.70"}]}
+    raw = {"create": [{"supplier": "Synthetic Supplier", "model_id": "legacy", "billing_item": "input", "discount_rate": "0.70"}]}
     job = manager.workflow.create_draft(raw)
     identifier = "review:" + job["id"]
     store.apply_bundle(raw, import_id=identifier)
@@ -313,7 +313,7 @@ def test_prompts_separate_price_applicability_conditions_from_provenance(tmp_pat
     assert "provenance, header/cell references, currency/unit evidence and already-typed TTL must not go there" in lookup
     # Trusted prompts guide extraction; unknown original business values are never scrubbed.
     raw = {"header_cell": "A1", "unknown_pricing_term": "literal business text"}
-    prepared = prepare({"create": [{"model_id": "m", "pricing_conditions": {"raw": raw}}]},
+    prepared = prepare({"create": [{"supplier": "Synthetic Supplier", "model_id": "m", "pricing_conditions": {"raw": raw}}]},
                        store.catalog_snapshot())
     assert prepared["bundle"]["create"][0]["pricing_conditions"]["raw"] == raw
     store.close()
@@ -321,7 +321,7 @@ def test_prompts_separate_price_applicability_conditions_from_provenance(tmp_pat
 def test_quote_structural_defaults_do_not_become_confirmed_corrections(tmp_path):
     from tokensql.workspace.memory import AgentMemory
     memory = AgentMemory(tmp_path / "memory")
-    original = {"create": [{"model_id": "m", "discount_rate": "0.70"}]}
+    original = {"create": [{"supplier": "Synthetic Supplier", "model_id": "m", "discount_rate": "0.70"}]}
     revised = deepcopy(original)
     revised["create"][0].update(billing_metric=None, pricing_conditions={}, discount_scope="unknown",
                                 discount_items=[], conditions={})

@@ -70,7 +70,7 @@ def test_official_and_supplier_raw_currency_and_unit_retained_without_projection
 def test_raw_only_even_when_display_conversion_has_complete_evidence(store, unit, quantity, with_context):
     if with_context:
         store.set_pricing_context(fx_rates=rates(), token_equivalences=[factor()], expected_revision=1)
-    item = store.apply_bundle({"create": [quote(amount="0.001", discount_rate="0.8", unit=unit, unit_quantity=quantity)]})["items"][0]
+    item = store.apply_bundle({"create": [quote(amount="0.001", discount_rate="0.8", pricing_basis="amount", unit=unit, unit_quantity=quantity)]})["items"][0]
     assert item["amount"] == "0.001" and item["discount_rate"] == "0.80"
     assert item["unit"] == unit and item["unit_quantity"] == quantity
     assert item["derived_amount"] is None and item["converted_supplier_amount"] is None
@@ -82,7 +82,7 @@ def test_raw_only_even_when_display_conversion_has_complete_evidence(store, unit
 
 @pytest.mark.parametrize("currency", [None, "CNY", "USD", "HKD"])
 def test_discount_only_never_needs_official_price_or_fx(store, currency):
-    item = store.apply_bundle({"create": [{"model_id": "new-unknown", "discount_rate": "1.2", "currency": currency}]})["items"][0]
+    item = store.apply_bundle({"create": [{"supplier": "Synthetic Supplier", "model_id": "new-unknown", "discount_rate": "1.2", "currency": currency}]})["items"][0]
     assert item["amount"] is None and item["discount_rate"] == "1.20"
     assert item["raw_discount_rate"] == "1.20" and item["official_price"] is None
     assert item["derived_amount"] is None and item["normalized"] == {}
