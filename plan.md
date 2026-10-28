@@ -4,10 +4,6 @@
 
 plan仅记录未完成事项；已完成的供应商必填、模型比价、条件定价、聊天布局和报价更新工程及验收结果见[progress.md](progress.md)。现行操作与设计见[比价和更新指南](docs/supplier_updates.md)、[条件定价契约](docs/pricing_conditions_contract.md)、[工程接口](docs/contracts.md)。
 
-## 交付收尾
-
-- [ ] 提交并推送ui-supplier-comparison，确认本地/远程仅main和新分支。完成后本节移入progress。
-
 ## 新文件验收
 
 - [ ] 等用户重新上传基准Excel，先确认供应商、原始币种/单位、整模或分项范围，交OpenCode生成草案；不重新导入旧Excel，不读取清理备份。
