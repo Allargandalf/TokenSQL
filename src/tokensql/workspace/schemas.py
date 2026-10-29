@@ -526,3 +526,83 @@ class PricingContextUpdate(Contract):
     fx_rates: list[ExchangeRate] = Field(default_factory=list)
     token_equivalences: list[TokenEquivalence] = Field(default_factory=list)
     actor: str = "workspace-ui"
+
+
+class SupplierModelMapping(Contract):
+    id: str | None = Field(default=None, max_length=255)
+    raw_name: str = Field(min_length=1, max_length=1000)
+    model_id: str = Field(min_length=1, max_length=1000)
+    supplier_model_id: str | None = Field(default=None, max_length=1000)
+    aliases: list[str] = Field(default_factory=list, max_length=100)
+    enabled: bool = True
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("raw_name", "model_id", "aliases", mode="after")
+    @classmethod
+    def nonblank_names(cls, value: Any) -> Any:
+        if isinstance(value, list):
+            return list(dict.fromkeys(_required_text(item) for item in value))
+        return _required_text(value)
+
+    @field_validator("evidence")
+    @classmethod
+    def bounded_evidence(cls, value: dict[str, Any]) -> dict[str, Any]:
+        import json
+        if len(json.dumps(value, ensure_ascii=False, default=str)) > 16000:
+            raise ValueError("profile evidence must be lightweight (at most 16000 characters)")
+        return value
+
+
+class SupplierBusinessRule(Contract):
+    id: str | None = Field(default=None, max_length=255)
+    kind: str = Field(default="interpretation", min_length=1, max_length=100)
+    text: str = Field(min_length=1, max_length=16000)
+    enabled: bool = True
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("kind", "text")
+    @classmethod
+    def nonblank_rule(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("profile rule must not be blank")
+        return value.strip()
+
+    @field_validator("evidence")
+    @classmethod
+    def bounded_evidence(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return SupplierModelMapping.bounded_evidence(value)
+
+
+class SupplierSourceProfile(Contract):
+    default_prompt: str | None = Field(default=None, max_length=16000)
+    model_mappings: list[SupplierModelMapping] = Field(default_factory=list, max_length=3000)
+    rules: list[SupplierBusinessRule] = Field(default_factory=list, max_length=500)
+
+
+class SupplierProfileContent(SupplierSourceProfile):
+    sources: dict[str, SupplierSourceProfile] = Field(default_factory=dict, max_length=100)
+
+    @field_validator("sources")
+    @classmethod
+    def source_names(cls, value: dict[str, SupplierSourceProfile]) -> dict[str, SupplierSourceProfile]:
+        result = {}
+        for scope, profile in value.items():
+            scope = _required_text(scope)
+            if len(scope) > 255 or scope in result:
+                raise ValueError("profile source_scope must be unique bounded text")
+            result[scope] = profile
+        return result
+
+
+class SupplierProfileWrite(Contract):
+    expected_revision: int = Field(ge=0)
+    default_prompt: str | None = Field(default=None, max_length=16000)
+    model_mappings: list[SupplierModelMapping] = Field(default_factory=list, max_length=3000)
+    rules: list[SupplierBusinessRule] = Field(default_factory=list, max_length=500)
+    sources: dict[str, SupplierSourceProfile] = Field(default_factory=dict, max_length=100)
+    actor: str | None = Field(default=None, max_length=255)
+
+    @field_validator("sources")
+    @classmethod
+    def source_names(cls, value: dict[str, SupplierSourceProfile]) -> dict[str, SupplierSourceProfile]:
+        return SupplierProfileContent.source_names(value)

@@ -13,12 +13,15 @@ from threading import RLock
 from typing import Any, Sequence
 from uuid import uuid4
 
-from .memory import AgentMemory, atomic_json
+from .memory import (AgentMemory, atomic_json, remember_supplier_confirmation,
+                     supplier_profile_context, supplier_confirmation_updates)
 from .discount import DISCOUNT_POLICY_VERSION, normalize_discount_rate
 from .clarification import NeedsInput
 from .schemas import PricingBundle
 from .store import RevisionConflictError
 from .official_lookup import validate_lookup_bundle
+from .source_reading import (freeze_source_baseline, merge_source_bundle, public_source_comparison,
+                             record_source_baseline, source_coverage, rebind_source_officials)
 
 _SAFE = re.compile(r"[^\w.()\uFF08\uFF09\[\]{} +\-@]", re.UNICODE)
 _ZERO = {"added": 0, "updated": 0, "deleted": 0, "total": 0}
@@ -254,16 +257,53 @@ class WorkflowService:
                 and job.get("conversation_id") == conversation_id for job in self.state["jobs"].values()):
             raise RevisionConflictError("Conversation is waiting for input; respond to its existing import job")
 
+    async def _finish_pending_confirmations(self, supplier_id: str | None,
+                                            exclude_identifier: str | None = None) -> None:
+        for identifier in list(self.state["jobs"]):
+            pending = self._job(identifier)
+            if pending["status"] != "committed" or identifier == exclude_identifier:
+                continue
+            owners = {item["supplier_id"] for item in pending.get("profile_updates", [])}
+            if pending.get("supplier_id"):
+                owners.add(pending["supplier_id"])
+            if supplier_id and owners and supplier_id not in owners and not any(owner.startswith("pending-name:") for owner in owners):
+                continue
+            async with self._job_locks.setdefault(identifier, asyncio.Lock()):
+                with self._lock:
+                    pending = self._job(identifier)
+                    if pending["status"] != "committed":
+                        continue
+                    try:
+                        self._finish_confirmation(pending)
+                    except Exception as error:
+                        raise RevisionConflictError("Prior import " + identifier + " is already committed but its confirmation receipt needs recovery; retry its confirmation before this supplier continues (" + type(error).__name__ + ")") from error
+
     async def start(self, *, upload_ids: Sequence[str], prompt: str,
                     conversation_id: str | None = None, intent: str = "import",
                     lookup_model_id: str | None = None, lookup_billing_item: str | None = None,
-                    supplier_id: str | None = None, update_request: dict[str, Any] | None = None) -> dict[str, Any]:
+                    supplier_id: str | None = None, update_request: dict[str, Any] | None = None,
+                    source_scope: str | None = None, persist_profile: bool = True,
+                    remember_prompt: bool = False, full_reparse: bool = False) -> dict[str, Any]:
         if intent not in {"import", "official_price_lookup"}:
             raise ValueError("unknown workflow intent")
+        await self._finish_pending_confirmations(supplier_id)
         if update_request is not None and (intent != "import" or not upload_ids):
             raise ValueError("supplier updates require uploaded files in an ordinary import session")
+        request_supplier = (update_request or {}).get("supplier_id")
+        if supplier_id and request_supplier and supplier_id != request_supplier:
+            raise ValueError("supplier_id conflicts with update_request supplier")
+        supplier_id = supplier_id or request_supplier
         if supplier_id is not None:
             self._confirmed_supplier(supplier_id)
+        request_scope = (update_request or {}).get("source_scope")
+        if source_scope is not None and request_scope and source_scope.strip() != request_scope:
+            raise ValueError("source_scope conflicts with update_request source scope")
+        source_scope = (source_scope if source_scope is not None else request_scope) or "default"
+        source_scope = str(source_scope).strip()
+        if not source_scope or len(source_scope) > 255:
+            raise ValueError("source_scope must contain 1 to 255 characters")
+        if intent == "import":
+            supplier_id, conversation_id = await self.manager.resolve_supplier_session(supplier_id, conversation_id)
         self.ensure_no_waiting_session(conversation_id)
         session_scope = getattr(self.manager, "_sessions", {}).get(conversation_id, {})
         continuation = session_scope.get("intent") == "official_price_lookup"
@@ -299,9 +339,15 @@ class WorkflowService:
                 items.append(item)
             if sum(item["size"] for item in items) > self.config.max_total_bytes:
                 raise ValueError("uploads exceed the total size limit")
+            auto_reconciliation = supplier_id is not None and bool(items) and update_request is None and intent == "import"
+            if auto_reconciliation:
+                update_request = self._default_update_request(supplier_id, source_scope)
             job = self._new_job(prompt, conversation_id, list(upload_ids))
-            job.update(intent=intent, lookup_model_id=lookup_model_id, lookup_billing_item=lookup_billing_item,
-                       supplier_id=supplier_id, update_request=deepcopy(update_request))
+            job.update(auto_reconciliation=auto_reconciliation, intent=intent, lookup_model_id=lookup_model_id, lookup_billing_item=lookup_billing_item,
+                       supplier_id=supplier_id, update_request=deepcopy(update_request), source_scope=source_scope,
+                       persist_profile=persist_profile, remember_prompt=remember_prompt, full_reparse=full_reparse,
+                       profile_context=supplier_profile_context(self.store, supplier_id, source_scope)
+                           if intent == "import" else None)
             if update_request is not None:
                 job["update_request"]["file_sha256"] = self._upload_fingerprint(items)
                 if supplier_id:
@@ -338,6 +384,7 @@ class WorkflowService:
                "pricing_policy_version": PRICING_POLICY_VERSION,
                "attempt": 1, "clarifications": [], "questions": [], "question_summary": None,
                "intent": "import", "lookup_model_id": None, "lookup_billing_item": None,
+               "source_scope": "default", "persist_profile": True, "remember_prompt": False, "profile_context": None,
                "upload_ids": upload_ids, "prompt": prompt, "bundle": None, "original_bundle": None,
                "preview": None, "issues": [], "proposal_issues": [], "error": None, "assistant_message": None,
                "messages": [], "changes": dict(_ZERO), "created_at": now(), "updated_at": now()}
@@ -349,6 +396,37 @@ class WorkflowService:
             if supplier.get("supplier_id", supplier.get("id")) == identifier:
                 return supplier
         raise ValueError("Choose an existing confirmed supplier or confirm its creation first")
+
+    def _default_update_request(self, supplier_id: str, source_scope: str) -> dict[str, Any]:
+        snapshot = self.store.catalog_snapshot()
+        existing = any(row.get("supplier_id") == supplier_id and row.get("source_scope") == source_scope
+                       for row in snapshot.get("quotes", []))
+        receipts = any(row.get("supplier_id") == supplier_id and row.get("source_scope") == source_scope
+                       for row in snapshot.get("supplier_update_receipts", []))
+        fresh = not existing and not receipts and self.store.get_supplier_baseline(supplier_id, source_scope) is None
+        return {"supplier_id": supplier_id, "source_scope": source_scope, "mode": "incremental",
+                "latest_confirmed": fresh}
+
+    def accept_source_proposal(self, identifier: str, candidate: dict[str, Any], issues: list[Any] | None = None,
+                               reconciliation_request: dict[str, Any] | None = None) -> None:
+        job = self._job(identifier)
+        bundle = merge_source_bundle(job, candidate)
+        observations = source_coverage(job, reconciliation_request)
+        self.update_job(identifier, source_read_coverage={
+            "complete_read": bool((observations or {}).get("complete_read")),
+            "covered_sheets": deepcopy((observations or {}).get("covered_sheets", [])),
+            "unresolved_items": (observations or {}).get("unresolved_items", 0)})
+        self.accept_proposal(identifier, bundle, issues, observations)
+        current = self._job(identifier)
+        reused = job.get("_source_reused_bundle") or {}
+        reused_count = sum(len(reused.get(key, [])) for key in ("create", "official_prices"))
+        interpreted = sum(len(candidate.get(key, [])) for key in ("create", "official_prices"))
+        metrics = {**current.get("metrics", {}), "reused_entries": reused_count,
+                   "reinterpreted_entries": interpreted, "clarification_count": len(current.get("clarifications", []))}
+        plan = deepcopy(current.get("reading_plan"))
+        if plan:
+            plan.setdefault("stats", {}).update(reused_entries=reused_count, reinterpreted_entries=interpreted)
+        self.update_job(identifier, metrics=metrics, reading_plan=plan)
 
     @staticmethod
     def _upload_fingerprint(items: Sequence[dict[str, Any]]) -> str:
@@ -363,12 +441,23 @@ class WorkflowService:
         if not supplier_id:
             return result
         supplier = self._confirmed_supplier(supplier_id)
+        def check_scope(row: dict[str, Any]) -> None:
+            if row.get("supplier_id") and row["supplier_id"] != supplier_id:
+                raise ValueError("quotation belongs to another supplier than this selected supplier session")
+            name = " ".join(str(row.get("supplier") or "").split()).casefold()
+            allowed = {" ".join(value.split()).casefold()
+                       for value in [supplier["name"], *supplier.get("aliases", [])]}
+            if name and name not in allowed:
+                raise ValueError("quotation supplier name conflicts with this selected supplier session")
         for item in result.get("create", []):
+            check_scope(item)
             if not item.get("supplier_id") and not item.get("supplier"):
                 item.update(supplier_id=supplier_id, supplier=supplier["name"])
         for item in result.get("update", []):
             changes = item.get("changes", {})
             existing = self.store.get_quote(item["id"]).model_dump(mode="json")
+            check_scope(existing)
+            check_scope({**existing, **changes})
             if not changes.get("supplier_id") and not changes.get("supplier") and not existing.get("supplier"):
                 changes.update(supplier_id=supplier_id, supplier=supplier["name"])
         return result
@@ -421,7 +510,7 @@ class WorkflowService:
                     finally:
                         book.release_resources()
                 elif suffix in {".csv", ".tsv"}:
-                    sheets.add(item["filename"])
+                    sheets.add("CSV")
                 else:
                     # The model can read arbitrary business files. An unknown
                     # container cannot establish complete workbook coverage.
@@ -453,7 +542,9 @@ class WorkflowService:
                 request["unresolved_items"] = max(1, request.get("unresolved_items", 0))
         request["entries"] = deepcopy(bundle.get("create", []))
         request["models"] = deepcopy(bundle.get("models", []))
-        request["official_prices"] = deepcopy(bundle.get("official_prices", []))
+        unchanged_official = set(job.get("_source_unchanged_official_ids", []))
+        request["official_prices"] = [deepcopy(row) for row in bundle.get("official_prices", [])
+                                      if row.get("official_price_id") not in unchanged_official]
         request["file_sha256"] = self._upload_fingerprint(
             [self.state["uploads"][key] for key in job["upload_ids"]])
         if job.get("supplier_id"):
@@ -478,6 +569,7 @@ class WorkflowService:
 
     def _review_proposal(self, job: dict[str, Any], bundle: dict[str, Any],
                          metadata: dict[str, Any] | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+        bundle = rebind_source_officials(self, job, bundle)
         if job.get("update_request") is not None:
             request = self._reconciliation_request(job, bundle, metadata)
             preview = json_value(self.store.preview_reconciliation(request))
@@ -485,6 +577,11 @@ class WorkflowService:
             job["proposal_bundle"] = deepcopy(bundle)
             return preview.get("bundle", {}), preview
         validate_lookup_bundle(job, bundle, self.store.catalog_snapshot())
+        if job.get("upload_ids") and job.get("intent") != "official_price_lookup":
+            job["proposal_bundle"] = deepcopy(bundle)
+            unchanged = set(job.get("_source_unchanged_official_ids", []))
+            bundle = {**bundle, "official_prices": [row for row in bundle.get("official_prices", [])
+                       if row.get("official_price_id") not in unchanged]}
         return bundle, json_value(self.store.preview_bundle(bundle))
 
     def create_draft(self, bundle: dict[str, Any], prompt: str = "") -> dict[str, Any]:
@@ -495,10 +592,23 @@ class WorkflowService:
             self.accept_proposal(job["id"], bundle)
             return self.get(job["id"])
 
-    def get(self, identifier: str) -> dict[str, Any]:
+    def get(self, identifier: str, *, include_source_comparison: bool = True) -> dict[str, Any]:
         with self._lock:
-            job = deepcopy(self._job(identifier))
+            raw = self._job(identifier)
+            hidden = {"original_bundle", "profile_updates", "baseline_update"}
+            job = deepcopy({key: value for key, value in raw.items()
+                            if key not in hidden and not key.startswith("_source_")
+                            and (include_source_comparison or key != "source_comparison")})
+            if not include_source_comparison and raw.get("source_comparison"):
+                job["source_comparison_available"] = True
             job.pop("original_bundle", None)
+            job.pop("profile_updates", None)
+            job.pop("baseline_update", None)
+            for key in list(job):
+                if key.startswith("_source_"):
+                    job.pop(key)
+            if job.get("source_comparison"):
+                job["source_comparison"] = public_source_comparison(job["source_comparison"])
             for key, default in (("attempt", 1), ("clarifications", []), ("questions", []), ("question_summary", None)):
                 job.setdefault(key, default)
             job["files"] = [self._file_public(self.state["uploads"][key]) for key in job["upload_ids"]]
@@ -506,7 +616,11 @@ class WorkflowService:
             return job
 
     def list_jobs(self) -> list[dict[str, Any]]:
-        return [self.get(key) for key in reversed(list(self.state["jobs"]))]
+        jobs = [self.get(key, include_source_comparison=False) for key in reversed(list(self.state["jobs"]))]
+        for job in jobs:
+            if job.pop("source_comparison", None) is not None:
+                job["source_comparison_available"] = True
+        return jobs
 
     def update_job(self, identifier: str, **values: Any) -> None:
         with self._lock:
@@ -526,6 +640,11 @@ class WorkflowService:
             job = deepcopy(current)
             batch_supplier = job.get("supplier_id") or (
                 job.get("reconciliation_request") or job.get("update_request") or {}).get("supplier_id")
+            if job.get("upload_ids") and job.get("intent") != "official_price_lookup":
+                for row in bundle.get("create", []):
+                    if row.get("source_scope") and row["source_scope"] != job.get("source_scope", "default"):
+                        raise ValueError("quotation source_scope conflicts with the selected quotation series")
+                    row["source_scope"] = job.get("source_scope") or "default"
             bundle = self._bind_supplier(bundle, batch_supplier)
             proposal_issues = json_value(issues or [])[:2000]
             # A missing supplier is a resumable business omission; invalid
@@ -574,6 +693,10 @@ class WorkflowService:
             if supplier_id is not None:
                 self._confirmed_supplier(supplier_id)
                 job["supplier_id"] = supplier_id
+                job["profile_context"] = supplier_profile_context(self.store, supplier_id, job.get("source_scope", "default"))
+                if job.get("upload_ids"):
+                    job["update_request"] = self._default_update_request(supplier_id, job.get("source_scope") or "default")
+                    job["auto_reconciliation"] = True
             return
         old = deepcopy(job.get("reconciliation_request") or job["update_request"])
         supplied = deepcopy(changes or {})
@@ -594,15 +717,18 @@ class WorkflowService:
             # Retained parsed observations cannot certify an expanded boundary.
             if isinstance(job.get("pending_reconciliation"), dict):
                 job["pending_reconciliation"].update(complete_read=False, covered_sheets=[])
+        job["source_scope"] = request.get("source_scope") or job.get("source_scope", "default")
         job["update_request"] = deepcopy(request)
         if job.get("reconciliation_request") is not None:
             job["reconciliation_request"] = deepcopy(request)
 
     async def respond(self, identifier: str, expected_revision: int, prompt: str,
-                      supplier_id: str | None = None, update_request: dict[str, Any] | None = None) -> dict[str, Any]:
+                      supplier_id: str | None = None, update_request: dict[str, Any] | None = None,
+                      persist_profile: bool | None = None, remember_prompt: bool | None = None) -> dict[str, Any]:
         prompt = prompt.strip()
         if not prompt or len(prompt) > 16000:
             raise ValueError("clarification response must contain 1 to 16000 characters")
+        await self._finish_pending_confirmations(supplier_id or self._job(identifier).get("supplier_id"), identifier)
         async with self._job_locks.setdefault(identifier, asyncio.Lock()):
             with self._lock:
                 current = self._job(identifier)
@@ -610,10 +736,16 @@ class WorkflowService:
                     raise RevisionConflictError("Clarification status or revision conflict")
                 job = deepcopy(current)
                 self._merge_update_context(job, update_request, supplier_id)
+                if persist_profile is not None:
+                    job["persist_profile"] = persist_profile
+                if remember_prompt is not None:
+                    job["remember_prompt"] = remember_prompt
                 if job.get("waiting_reason") == "supplier" and supplier_id and job.get("pending_bundle") is not None:
                     pending = self._bind_supplier(job["pending_bundle"], supplier_id)
                     clarification = {"attempt": job.get("attempt", 1), "prompt": prompt,
-                                     "supplier_id": supplier_id, "created_at": now()}
+                                     "supplier_id": supplier_id, "created_at": now(),
+                                     "persist_profile": job.get("persist_profile", True),
+                                     "questions": deepcopy(job.get("questions", []))}
                     job["clarifications"] = [*job.get("clarifications", []), clarification]
                     self.state["jobs"][identifier] = job
                     self.accept_proposal(identifier, pending, job.get("pending_issues"),
@@ -622,6 +754,7 @@ class WorkflowService:
                 next_attempt = job.get("attempt", 1) + 1
                 clarification = {"attempt": next_attempt, "prompt": prompt, "created_at": now(),
                                  "question_attempt": job.get("attempt", 1),
+                                 "persist_profile": job.get("persist_profile", True),
                                  "questions": deepcopy(job.get("questions", [])),
                                  "question_summary": job.get("question_summary"),
                                  "assistant_message": job.get("assistant_message")}
@@ -637,13 +770,18 @@ class WorkflowService:
 
     async def revise(self, identifier: str, expected_revision: int, bundle: dict[str, Any] | None = None,
                      reconciliation_request: dict[str, Any] | None = None,
-                     decisions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+                     decisions: list[dict[str, Any]] | None = None,
+                     persist_profile: bool | None = None, remember_prompt: bool | None = None) -> dict[str, Any]:
         async with self._job_locks.setdefault(identifier, asyncio.Lock()):
             with self._lock:
                 current = self._job(identifier)
                 if current["status"] != "ready" or current["revision"] != expected_revision:
                     raise ValueError("review status or revision conflict")
                 job = deepcopy(current)
+                if persist_profile is not None:
+                    job["persist_profile"] = persist_profile
+                if remember_prompt is not None:
+                    job["remember_prompt"] = remember_prompt
                 if reconciliation_request is not None or decisions is not None:
                     changes = deepcopy(reconciliation_request or {})
                     if decisions is not None:
@@ -710,6 +848,7 @@ class WorkflowService:
 
     async def confirm(self, identifier: str, expected_revision: int,
                       idempotency_key: str | None = None, *, recovering: bool = False) -> dict[str, Any]:
+        await self._finish_pending_confirmations(self._job(identifier).get("supplier_id"), identifier)
         async with self._job_locks.setdefault(identifier, asyncio.Lock()):
             with self._lock:
                 job = self._job(identifier)
@@ -732,6 +871,11 @@ class WorkflowService:
                 if reconciliation is None:
                     validate_lookup_bundle(job, job["bundle"], self.store.catalog_snapshot())
                 if not recovering:
+                    if reconciliation is not None and job.get("proposal_bundle") and job.get("upload_ids"):
+                        source = rebind_source_officials(self, job, job["proposal_bundle"])
+                        job["proposal_bundle"] = source
+                        reconciliation = self._reconciliation_request(job, source)
+                        job["reconciliation_request"] = deepcopy(reconciliation)
                     latest = json_value(self.store.preview_reconciliation(reconciliation) if reconciliation is not None
                                         else self.store.preview_bundle(job["bundle"]))
                     previous = job.get("preview") or {}
@@ -752,6 +896,20 @@ class WorkflowService:
                     if any(issue.get("code") == "pricing_basis_required"
                            for issue in latest.get("issues", []) if isinstance(issue, dict)):
                         raise ValueError("Choose amount or discount_rate as the valid pricing basis before confirmation")
+                if not recovering:
+                    filenames = [self.state["uploads"][key]["filename"] for key in job["upload_ids"]]
+                    profile_updates = supplier_confirmation_updates(self.store, job, filenames)
+                    candidate = job.get("proposal_bundle") or job.get("bundle") or {}
+                    allowed_models = [row["model_id"] for group in ("models", "create")
+                                      for row in candidate.get(group, []) if row.get("model_id")]
+                    profile_previews = {}
+                    for update in profile_updates:
+                        if not str(update["supplier_id"]).startswith("pending-name:"):
+                            before = self.store.get_supplier_profile(update["supplier_id"], update["source_scope"])
+                            after = self.store.preview_confirmed_supplier_profile(**update, allowed_model_ids=allowed_models)
+                            profile_previews[update["supplier_id"]] = {"before": before, "after": after}
+                    job["profile_updates"] = deepcopy(profile_updates)
+                    freeze_source_baseline(self, job, profile_previews)
                 job.update(status="confirming", confirmation_key=idempotency_key or identifier, updated_at=now())
                 self._save()
                 try:
@@ -795,15 +953,38 @@ class WorkflowService:
                 self._finish_confirmation(job)
             return self.get(identifier)
 
+    def _compact_terminal_source_state(self, job: dict[str, Any]) -> None:
+        for key in list(job):
+            if key.startswith("_source_") or key in {"profile_updates", "baseline_update"}:
+                job.pop(key, None)
+        if job["status"] == "confirmed":
+            if job.get("source_comparison"):
+                job["source_comparison"] = public_source_comparison(job["source_comparison"])
+            sid, scope = job.get("supplier_id"), job.get("source_scope", "default")
+            if sid:
+                for previous in self.state["jobs"].values():
+                    if (previous["id"] != job["id"] and previous.get("status") == "confirmed"
+                            and previous.get("supplier_id") == sid and previous.get("source_scope", "default") == scope
+                            and previous.pop("source_comparison", None) is not None):
+                        previous["source_comparison_archived"] = True
+        else:
+            job.pop("source_comparison", None)
+
     def _finish_confirmation(self, job: dict[str, Any]) -> None:
         result = job["commit_result"]
-        self.memory.remember_confirmed(job["id"], job["original_bundle"], job.get("proposal_bundle", job["bundle"]),
-                                       [self.state["uploads"][key]["filename"] for key in job["upload_ids"]])
+        filenames = [self.state["uploads"][key]["filename"] for key in job["upload_ids"]]
+        remember_supplier_confirmation(self.store, job, filenames)
+        self.manager.adopt_confirmed_supplier(job)
+        record_source_baseline(self, job)
         changes = dict(result.get("changes", {}))
         changes.setdefault("total", sum(int(changes.get(key, 0)) for key in ("added", "updated", "deleted")))
         job.update(status="confirmed", changes=changes, preview=result, error=None,
                    revision=job["revision"] + 1, updated_at=now())
+        self._compact_terminal_source_state(job)
         self._save()
+        if job.get("supplier_id") and job.get("conversation_id") in getattr(self.manager, "_sessions", {}):
+            self.manager._sessions[job["conversation_id"]]["summary"] = self.manager._supplier_summary(job["supplier_id"])
+            atomic_json(self.manager._sessions_path, self.manager._sessions)
         self._remove_draft(job["id"])
 
     async def cancel(self, identifier: str) -> dict[str, Any]:
@@ -824,6 +1005,7 @@ class WorkflowService:
                     job.pop(key, None)
                 job.update(status="cancelled", bundle=None, original_bundle=None, preview=None,
                            issues=[], questions=[], question_summary=None, error=None, changes=dict(_ZERO), revision=job["revision"] + 1, updated_at=now())
+                self._compact_terminal_source_state(job)
                 self._save()
             return self.get(identifier)
 

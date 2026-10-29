@@ -109,8 +109,12 @@ def test_confirm_revision_idempotency_and_confirmed_correction(tmp_path):
         replay = await manager.workflow.confirm(run.id, job["revision"], "click-1")
         assert replay["changes"] == confirmed["changes"]
         assert len(store.catalog_snapshot()["quotes"]) == 1
-        assert "Corrected Supplier" in manager.memory.prompt()
-        assert manager.memory.read()["rules"][0]["source"] == "confirmed_review"
+        assert "Corrected Supplier" not in manager.memory.prompt()
+        supplier_id = store.catalog_snapshot()["quotes"][0]["supplier_id"]
+        profile = store.get_supplier_profile(supplier_id, "default")
+        assert "Corrected Supplier" in json.dumps(profile["effective"]["rules"])
+        assert profile["effective"]["rules"][0]["evidence"]["source"] == "confirmed_review"
+        assert manager.memory.read()["rules"] == []
         with pytest.raises(ValueError):
             await manager.workflow.cancel(run.id)
     asyncio.run(scenario())
@@ -219,7 +223,7 @@ def test_session_history_restores_and_memory_replays_latest(tmp_path):
         posts = [r for r in requests if r.method == "POST" and r.url.path == "/session"]
         assert len(posts) == 1
         last = [r for r in requests if r.method == "POST" and r.url.path.endswith("/message")][-1]
-        assert "Use the stated supplier channel" in json.loads(last.content)["system"]
+        assert "Use the stated supplier channel" not in json.loads(last.content)["system"]
     asyncio.run(scenario())
 
 def test_draft_tool_decimal_fx_and_no_commit_operation(tmp_path, capsys):
@@ -351,15 +355,15 @@ def test_postcommit_memory_failure_direct_retry_is_idempotent(tmp_path, monkeypa
     async def scenario():
         manager, store, _ = mocked(tmp_path)
         job = manager.workflow.create_draft(bundle())
-        original = manager.memory.remember_confirmed
+        original = store.record_confirmed_supplier_profile
         def unavailable(*args, **kwargs):
             raise OSError("test memory disk outage")
-        monkeypatch.setattr(manager.memory, "remember_confirmed", unavailable)
+        monkeypatch.setattr(store, "record_confirmed_supplier_profile", unavailable)
         with pytest.raises(OSError):
             await manager.workflow.confirm(job["id"], job["revision"])
         assert manager.workflow.get(job["id"])["status"] == "committed"
         assert len(store.catalog_snapshot()["quotes"]) == 1
-        monkeypatch.setattr(manager.memory, "remember_confirmed", original)
+        monkeypatch.setattr(store, "record_confirmed_supplier_profile", original)
         result = await manager.workflow.confirm(job["id"], job["revision"])
         assert result["status"] == "confirmed" and len(store.catalog_snapshot()["quotes"]) == 1
     asyncio.run(scenario())

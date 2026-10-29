@@ -16,6 +16,8 @@
     deleting: false,
     files: [],
     conversationId: null,
+    supplierId: null,
+    submitting: false,
     agentBusy: false,
     sessionRestoring: false,
     editing: null,
@@ -361,6 +363,7 @@
 
   async function loadCatalog() {
     state.catalog = await api("/catalog");
+    window.dispatchEvent(new CustomEvent("tokensql:catalog", { detail: state.catalog }));
     renderRows();
     return state.catalog;
   }

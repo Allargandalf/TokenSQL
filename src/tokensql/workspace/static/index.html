@@ -91,9 +91,9 @@
               <p>分析文件 → 人工审核 → 确认入库</p>
             </div>
           </header>
-          <div class="session-toolbar"><select id="sessionSelect" aria-label="历史会话"><option value="">新会话</option></select><button id="newSessionButton" type="button" class="text-button">新会话</button><button id="memoryButton" type="button" class="text-button">纠错记忆</button></div>
+          <div class="supplier-conversation"><label>供应商<select id="conversationSupplier" aria-label="当前对话供应商"><option value="">选择供应商</option></select></label><label>报价单系列<input id="importSourceScope" list="supplierSourceScopes" placeholder="默认系列" aria-label="当前报价单系列"><datalist id="supplierSourceScopes"></datalist></label><div class="supplier-context-actions"><span id="supplierContextSummary">选择供应商，继续对应对话</span><button id="continueSupplierSessionButton" class="text-button" type="button" hidden>继续当前对话</button><button id="supplierLatestButton" class="text-button" type="button" hidden>最近导入</button></div></div><div class="session-toolbar"><select id="sessionSelect" aria-label="历史会话"><option value="">新会话</option></select><button id="newSessionButton" type="button" class="text-button">开启新一轮</button><button id="memoryButton" type="button" class="text-button">供应商档案</button></div>
           <div class="job-strip" id="jobStrip" hidden><span id="jobStatus"></span><button id="reviewOpenButton" class="text-button" type="button" hidden>打开审核</button><button id="abortButton" class="text-button danger" type="button">中止</button></div>
-          <div id="preparedUpdateNotice" class="prepared-update-notice" hidden><span id="preparedUpdateText"></span><button id="clearPreparedUpdateButton" class="text-button" type="button">取消更新模式</button></div><details class="input-files"><summary>输入文件 <span id="inputFileCount"></span></summary><div id="inputFiles"></div></details>
+          <div id="jobReadingSummary" class="job-reading-summary" hidden></div><div id="preparedUpdateNotice" class="prepared-update-notice" hidden><span id="preparedUpdateText"></span><button id="clearPreparedUpdateButton" class="text-button" type="button">取消更新模式</button></div><details class="input-files"><summary>输入文件 <span id="inputFileCount"></span></summary><div id="inputFiles"></div></details>
           <div class="conversation" id="conversation" aria-live="polite">
           <section id="waitingPanel" class="waiting-panel" aria-labelledby="waitingHeading" hidden>
             <h3 id="waitingHeading">等待补充</h3>
@@ -118,6 +118,7 @@
           <div class="composer" id="composer">
             <div class="drop-hint" id="dropHint">松开即可添加文件</div>
             <p id="composerHint" class="composer-hint" hidden></p>
+            <details class="import-preferences"><summary>导入设置</summary><label class="checkbox-label"><input id="fullReparse" type="checkbox">整表重新理解</label><label class="checkbox-label"><input id="persistProfile" type="checkbox" checked>确认后保存本次纠正与补答到档案</label><label class="checkbox-label"><input id="rememberPrompt" type="checkbox">将本次要求设为该系列默认要求</label></details>
             <details class="composer-attachments"><summary id="attachmentSummary">附件 0</summary><div class="file-chips" id="fileChips"></div></details>
             <textarea id="promptInput" rows="3" placeholder="输入指令，或拖入 / 粘贴文件…" aria-label="给 OpenCode 的指令"></textarea>
             <div class="composer-footer">
@@ -160,8 +161,8 @@
 
   <dialog class="editor-dialog review-dialog" id="reviewDialog">
     <header><div><p class="eyebrow">REVIEW BEFORE COMMIT</p><h2>审核候选方案</h2><p id="reviewMeta"></p></div><button id="hideReviewButton" class="icon-button" type="button" aria-label="稍后审核">×</button></header>
-    <div class="review-content"><p class="review-notice">以下是待确认草案。可编辑模型、官网计费项与供应商报价；文件明确标注的官网价须保留 explicit_official 和单元格依据。修正经确认后才会形成有作用域的记忆。</p>
-      <div id="reviewSections"></div>
+    <div class="review-content"><p class="review-notice">核对本期报价与原表变化，修正后确认入库。模型名称与表格含义按本次设置保存到供应商档案。</p>
+      <div id="reviewProfileSettings" class="review-profile-settings"><label class="checkbox-label"><input id="reviewPersistProfile" type="checkbox" checked>确认后保存名称和表格含义</label><label class="checkbox-label"><input id="reviewRememberPrompt" type="checkbox">保存本期要求为系列默认</label></div><div id="reviewSourceComparison" hidden></div><div id="reviewSections"></div>
       <details class="bundle-details"><summary>完整候选 JSON（包含条件、更新与删除）</summary><textarea id="reviewBundle" rows="12" spellcheck="false" aria-label="完整候选方案 JSON"></textarea><button id="applyReviewJsonButton" class="button secondary small" type="button">应用 JSON 编辑</button></details>
       <div class="computed-card" id="reviewPreview" aria-live="polite"></div><div id="reviewIssues" role="alert"></div>
     </div>
@@ -173,10 +174,25 @@
     <div class="review-content"><div id="catalogContents"></div><div class="catalog-actions"><button id="newModelButton" class="button secondary" type="button">新增模型</button><button id="newOfficialButton" class="button secondary" type="button">新增官网计费项</button></div></div>
   </dialog>
 
-  <dialog class="editor-dialog" id="memoryDialog">
-    <header><div><p class="eyebrow">CONFIRMED CORRECTIONS</p><h2>已确认纠错记忆</h2></div><button id="closeMemoryButton" class="icon-button" type="button" aria-label="关闭记忆">×</button></header>
-    <div class="review-content"><p class="review-notice">仅使用已确认修正；每条规则保留作用域。取消的草案不会写入这里。</p><div id="memoryRules"></div><button id="addMemoryRuleButton" class="text-button" type="button">+ 添加规则</button><p id="memoryError" class="form-error" role="alert"></p></div>
-    <footer><button id="saveMemoryButton" class="button primary" type="button">保存记忆修订</button></footer>
+  <dialog class="editor-dialog profile-dialog" id="profileDialog">
+    <header><div><p class="eyebrow">SUPPLIER PROFILE</p><h2>供应商档案</h2><p id="profileMeta"></p></div><button id="closeProfileButton" class="icon-button" type="button" aria-label="关闭供应商档案">×</button></header>
+    <div class="review-content">
+      <div class="profile-selectors"><label>供应商<select id="profileSupplier" aria-label="档案供应商"></select></label><label>适用报价单<select id="profileScope" aria-label="档案报价单系列"></select></label></div>
+      <div class="profile-series-actions"><input id="profileNewScope" aria-label="新报价单系列" placeholder="新报价单系列名称"><button id="addProfileScopeButton" class="button secondary small" type="button">添加系列</button><button id="deleteProfileScopeButton" class="text-button danger" type="button">删除系列</button></div>
+      <div id="profileFields" hidden>
+        <label class="profile-prompt">默认导入要求<textarea id="profilePrompt" rows="3" aria-label="档案默认导入要求" placeholder="填写此供应商或报价单系列的常用要求"></textarea></label>
+        <section><div class="review-section-heading"><h3>模型名称映射</h3><button id="addProfileMappingButton" class="text-button" type="button">+ 添加映射</button></div><div id="profileMappings"></div></section>
+        <section><div class="review-section-heading"><h3>表格含义与长期偏好</h3><button id="addProfileRuleButton" class="text-button" type="button">+ 添加规则</button></div><div id="profileRules"></div></section>
+      </div>
+      <p id="profileEmpty" class="muted-cell"></p><p id="profileError" class="form-error" role="alert"></p>
+    </div>
+    <footer><button id="openGlobalPreferencesButton" class="text-button" type="button">应用偏好</button><span id="profileSaveState" class="muted-cell"></span><button id="reloadProfileButton" class="text-button" type="button" hidden>放弃修订并加载最新档案</button><span class="review-footer-spacer"></span><button id="saveProfileButton" class="button primary" type="button">保存档案</button></footer>
+  </dialog>
+
+  <dialog class="editor-dialog" id="globalPreferencesDialog">
+    <header><div><p class="eyebrow">APPLICATION PREFERENCES</p><h2>应用偏好</h2><p class="muted-cell">适用于所有供应商的常用要求</p></div><button id="closeGlobalPreferencesButton" class="icon-button" type="button" aria-label="关闭应用偏好">×</button></header>
+    <div class="review-content"><div id="globalPreferencesRules"></div><button id="addGlobalPreferenceButton" class="text-button" type="button">+ 添加偏好</button><p id="globalPreferencesError" class="form-error" role="alert"></p></div>
+    <footer><button id="saveGlobalPreferencesButton" class="button primary" type="button">保存应用偏好</button></footer>
   </dialog>
 
   <dialog class="editor-dialog review-dialog" id="contextDialog">
@@ -225,6 +241,8 @@
   <div class="toast-region" id="toastRegion" aria-live="polite"></div>
   <script src="/static/app.js" defer></script>
   <script src="/static/conditions.js" defer></script>
+  <script src="/static/profiles.js" defer></script>
+  <script src="/static/source_comparison.js" defer></script>
   <script src="/static/review.js" defer></script>
   <script src="/static/context.js" defer></script>
   <script src="/static/conversion.js" defer></script>

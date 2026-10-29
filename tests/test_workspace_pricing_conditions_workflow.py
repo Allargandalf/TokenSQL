@@ -98,8 +98,9 @@ def test_unknown_scope_is_preserved_until_a_human_review_correction(tmp_path):
     assert review["preview"]["items"][0]["official_match"]["status"] == "matched"
     assert manager.memory.read()["rules"] == []
     asyncio.run(manager.workflow.confirm(job["id"], review["revision"]))
-    rule = manager.memory.read()["rules"][0]
-    assert rule["source"] == "confirmed_review" and '"discount_scope"' in rule["text"]
+    supplier_id = store.catalog_snapshot()["quotes"][0]["supplier_id"]
+    rule = store.get_supplier_profile(supplier_id, "default")["effective"]["rules"][0]
+    assert rule["evidence"]["source"] == "confirmed_review" and '"discount_scope"' in rule["text"]
     assert "official_price_id" in rule["text"]
     store.close()
 

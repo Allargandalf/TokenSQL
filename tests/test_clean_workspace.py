@@ -103,7 +103,7 @@ def test_create_app_starts_with_only_empty_workspace_state(
             "status": "ok",
             "application": "tokensql-workspace",
         }
-        assert api.version == "2.3.0"
+        assert api.version == "2.4.0"
 
     assert manager.stopped
     database = workspace / "quotes.sqlite3"
@@ -158,8 +158,8 @@ def test_package_and_project_versions_are_2_3_0() -> None:
     project = tomllib.loads(
         (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     )
-    assert tokensql.__version__ == "2.3.0"
-    assert project["project"]["version"] == "2.3.0"
+    assert tokensql.__version__ == "2.4.0"
+    assert project["project"]["version"] == "2.4.0"
 
 
 def test_supported_entrypoints_import_without_legacy_modules() -> None:

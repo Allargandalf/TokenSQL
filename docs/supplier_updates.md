@@ -1,6 +1,6 @@
 # 模型比价与供应商报价更新
 
-更新：2026-10-28。适用于 ui-supplier-comparison；main 的 v2.3 标签保留开发前基线。
+更新：2026-10-29。适用 v2.4「按供应商路由」。供应商档案、专属对话和新旧表格读取见[供应商路由说明](supplier_routing.md)。
 
 ## 日常比价
 
@@ -56,4 +56,4 @@ request中的mode为incremental/full；source_scope与supplier_id为范围，exp
 服务器：sh /home/user/luxiaofeng/TokenSQL/service.sh start 或 stop；status查看状态。
 本机只运行SSH转发：ssh -N -L 8765:127.0.0.1:8765 uni，然后打开 http://127.0.0.1:8765 。
 
-正常启停不清数据。2026-10-28按用户要求执行了一次清理脚本，正式库保持空，等待新文件；本轮自动验收仅使用隔离合成库，不重新导入旧Excel。清理脚本会另建项目外可恢复备份，与普通报价更新不同。
+正常启停保留数据、供应商档案、会话关联及已确认报价基准。主动清理脚本会另建项目外可恢复备份，与普通报价更新不同；历史清理记录见progress。

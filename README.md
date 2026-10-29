@@ -15,7 +15,9 @@
 - 关键缺项可先等待补充：直接补答后沿用原会话、文件继续，无需重新上传；支持多轮、刷新/重启恢复和取消。
 - 真正解析失败即时显示本轮真实回答与错误，无需切换会话；支持取消退回文件。
 - input/ → progress/ → 人工审核 → data/；取消回输入，确认幂等，事务/文件失败可恢复。
-- 独立OpenCode目录与持久会话、agent.md作用域纠错记忆。真实附件/数据库/会话/日志不进Git。
+- 选择供应商进入专属OpenCode对话；档案按报价单系列保存已确认名称映射、表格含义和默认Prompt。对话历史与长期档案分别维护，支持开启新一轮。
+- 后续报价按新旧表内容对比，复用已确认解释，变化区域交给OpenCode，再预审本期增改删。可查看表格差异和实际处理统计。
+- 独立OpenCode目录与持久会话，agent.md提供全局规则。真实附件/数据库/会话/日志不进Git。
 
 在服务器初始化：
 
@@ -36,6 +38,6 @@ sh service.sh stop
 ssh -N -L 8765:127.0.0.1:8765 uni
 ```
 
-浏览器打开 http://127.0.0.1:8765 。完整启动路径、环境、会话/隔离边界及使用见 [工作台文档](docs/workspace.md)，新版[比价与更新指南](docs/supplier_updates.md)，建议倍率见 [换算依据](docs/unit_conversion_reference.md)，官网入口见 [参考索引](docs/official_price_sources.md)。
+浏览器打开 http://127.0.0.1:8765 。完整启动路径、环境、会话/隔离边界及使用见 [工作台文档](docs/workspace.md)，新版[比价与更新指南](docs/supplier_updates.md)、[供应商路由与档案](docs/supplier_routing.md)，建议倍率见 [换算依据](docs/unit_conversion_reference.md)，官网入口见 [参考索引](docs/official_price_sources.md)。
 
 开发使用 Python>=3.10、uv、pytest；当前开发计划与真实验收状态见 [plan.md](plan.md)、[progress.md](progress.md)。合成/浏览器桩/真实模型/真实业务文件验收分别记录，不以单测数量冒充入库正确。不创建GitHub Release。

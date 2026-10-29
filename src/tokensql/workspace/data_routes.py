@@ -14,7 +14,7 @@ from pydantic import ValidationError
 from .schemas import (
     BulkQuoteRequest, BulkQuoteDeleteRequest, BulkQuoteDeleteResponse, BulkWriteResponse, Contract, FilterOptions, PricingBundle,
     QuoteListResponse, QuotePatch, QuoteResponse, PricingContextUpdate, ViewExportRequest,
-    SupplierWrite, SupplierReconciliationRequest,
+    SupplierWrite, SupplierReconciliationRequest, SupplierProfileWrite,
 )
 from .store import IdempotencyConflictError, QuoteNotFoundError, RevisionConflictError, WorkspaceStore
 from .units import pricing_units_payload
@@ -153,6 +153,28 @@ def create_data_router(store: WorkspaceStore) -> APIRouter:
     def confirm_supplier(request: SupplierWrite):
         try:
             return store.confirm_supplier(request)
+        except (ValueError, RevisionConflictError) as error:
+            raise _error(error) from None
+
+
+    @router.get("/suppliers/{supplier_id}/profile")
+    def supplier_profile(supplier_id: str, source_scope: str | None = None):
+        try:
+            return store.get_supplier_profile(supplier_id, source_scope)
+        except ValueError as error:
+            raise _error(error) from None
+
+    @router.get("/suppliers/{supplier_id}/profile/history")
+    def supplier_profile_history(supplier_id: str):
+        try:
+            return {"items": store.supplier_profile_history(supplier_id)}
+        except ValueError as error:
+            raise _error(error) from None
+
+    @router.put("/suppliers/{supplier_id}/profile")
+    def update_supplier_profile(supplier_id: str, request: SupplierProfileWrite):
+        try:
+            return store.update_supplier_profile(supplier_id, request)
         except (ValueError, RevisionConflictError) as error:
             raise _error(error) from None
 

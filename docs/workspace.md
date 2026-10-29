@@ -30,10 +30,10 @@ sh service.sh restart
 
 以下均在服务器，正常start/stop/restart不删除：
 
-- 正式数据库：`/home/user/luxiaofeng/TokenSQL/var/workspace/quotes.sqlite3`。
+- 正式数据库：`/home/user/luxiaofeng/TokenSQL/var/workspace/quotes.sqlite3`，包含报价、供应商档案和最新来源基准。
 - Excel生命周期：项目内`input/`（待处理）、`progress/`（处理/待审核）、`data/`（已确认原件归档）。
 - Codex测试库与私有比对资料：项目内`tests/data/`。
-- 独立OpenCode会话、草案与长期记忆：`/home/user/luxiaofeng/TokenSQL-opencode/`。
+- 独立OpenCode会话、草案、全局偏好：`/home/user/luxiaofeng/TokenSQL-opencode/`；sessions.json保存供应商默认会话关联。
 
 `data/`只是Excel归档，不是数据库。不要手动删除SQLite的`-wal`/`-shm`文件；备份应使用SQLite备份功能，或正常停服后复制数据库及相关资料。
 
@@ -47,7 +47,7 @@ sh scripts/clean.sh
 
 脚本显示完整范围，输入RESET确认一次；真正的一条命令免确认使用`sh scripts/clean.sh --yes`。只预览用`sh scripts/clean.sh --dry-run`，不改数据、不停服。可从任意目录执行`sh /home/user/luxiaofeng/TokenSQL/scripts/clean.sh`。
 
-清理范围是本项目的整个正式数据库（模型、官网价、报价、审计、幂等回执、汇率上下文等），以及专属OpenCode会话、任务/草案、运行日志和长期纠错记忆。默认系统规则来自代码，会重新生成；私有.env和共享provider配置不清理。参考汇率开启自动刷新时可在重启后重新加载。
+清理范围是本项目的整个正式数据库（模型、官网价、报价、供应商档案、来源基准、审计、幂等回执、汇率上下文等），以及专属OpenCode会话、任务/草案、运行日志和长期纠错记忆。默认系统规则来自代码，会重新生成；私有.env和共享provider配置不清理。参考汇率开启自动刷新时可在重启后重新加载。
 
 保留input/progress/data中的全部Excel、tests及测试数据、代码和配置。progress里的原件仍在，但旧job/等待补充记录已清，不能继续原任务；重新选择原文件导入即可。不要把“保留原件”理解成保留已入库数据。
 
@@ -113,9 +113,9 @@ amount和discount_rate独立保存，可均空、仅折扣或同时存在，不�
 
 ## OpenCode独立环境与历史
 
-默认项目外 ../TokenSQL-opencode/ 保存agent.md、memory.json、Session索引、runs草案和独立XDG配置/状态。SDK使用稳定directory和Session ID；UI选择会话后从API恢复历史，不仅存在浏览器内存。每次请求加载最新基础规则及带作用域的已确认人工纠错。取消草案不会生成规则；显示倍率也不会自动变成规则。
+默认项目外 ../TokenSQL-opencode/ 保存agent.md、memory.json、sessions.json、runs草案和独立XDG配置/状态。SDK使用稳定directory和Session ID；选择供应商后自动打开默认会话，从API恢复历史与等待任务。每次任务加载全局规则、当前供应商档案及当前报价单系列的设置。开启新一轮会话时携带档案和近期结果摘要。
 
-默认提示规则可在网页“纠错记忆”中添加global作用域并启用，保存后每次请求加载；项目外agent.md由memory.json及基础规则生成，直接手改会被覆盖。
+供应商长期要求在“供应商档案”中编辑；应用级要求在其中的“全局偏好”编辑。档案可按报价单系列保存模型名称映射、单位含义、规则和默认Prompt。勾选保存的补答与稳定语义修订随确认更新，金额和日期修订留在本期证据。项目外agent.md由全局偏好与基础规则生成，提供档案加载说明。
 
 模型可执行草案工具，正式写库权在宿主审核流程。bubblewrap把宿主文件系统设为只读、隐藏正式库/金标数据，只放开专用运行输出和OpenCode状态目录。网络为共享推理端点保留：这是可信个人环境的防误写隔离，不是对抗恶意代码的完整安全边界。--unsafe-no-sandbox 是显式降低隔离的选项，不默认启用。
 
@@ -125,11 +125,15 @@ amount和discount_rate独立保存，可均空、仅折扣或同时存在，不�
 
 刷新页面、切回会话或重启服务后，等待状态与问题保留。点取消将原件退回input；等待时不能确认旧草案。新增附件需先取消当前等待或切新会话，不能悄悄把新文件漏掉。若页面提示版本冲突，请刷新当前任务再补答，不连点重复提交。
 
-默认只对关键歧义反问，不为每个可空字段机械停住。若希望这类文件总是先检查缺项，可在“纠错记忆”添加global或供应商/文件作用域的规则，例如：
+默认只对关键歧义反问，不为每个可空字段机械停住。若希望该供应商的报价单总是先检查缺项，可在“供应商档案”相应系列的规则中添加，例如：
 
 > 生成入库草案前，先检查原表缺失或歧义；将需要我解释的内容一次性列出，使用等待补充流程。收到我的答复或明确允许留空后再生成草案。不得猜测，模型ID仍必须明确。
 
 模型输出当前attempt的needs_input.json（questions非空字符串数组，可选summary），或proposal.json，二者排他；draft_cli ask校验并生成提问文件。续答采用独立attempt目录和最新catalog，不覆写只读附件，也不误取上轮草案。真正SDK/网络/格式错误仍为failed并显示真实回复，不能用等待态掩盖故障。官网补价续答仍保留原模型范围和联网权限，不允许降级导入供应商文件。
+
+## 后续报价差异读取
+
+选择供应商和报价单系列后上传新文件，工作台先与该系列最近确认的原表比较。相同内容沿用解释；有变化的表格区域连同表头、单位和相关说明交给OpenCode。审核页可并排查看原表变化，再查看数据库增改删结果。勾选“整表重新理解”可主动重新解析。确认时同步更新档案及对比基准，取消时保留上一期基准。详见[供应商路由](supplier_routing.md)。
 
 ## 验证
 
@@ -141,3 +145,5 @@ amount和discount_rate独立保存，可均空、仅折扣或同时存在，不�
 双库比较只读，不会初始化或改写待比对库；未知实体、同物理模型拆ID严格失败。真实文件验收与合成/浏览器API桩分别记录progress.md，不能互相冒充。
 
 真实模型合成烟测使用 tools/workspace_smoke.py --base-url http://127.0.0.1:8787；默认审核候选后取消并复查空库，不是自动发布。--confirm仅对health声明isolated_test=true且初始报价空的测试实例开放，生产默认关闭该声明。请仅连接路径全部隔离、单独端口的QA，不对8765或用户业务文件运行。QA启动时显式 TOKENSQL_TEST_MODE=true，并将WORKSPACE_DIR/AGENT_DIR/INPUT_DIR/PROGRESS_DIR/DATA_DIR全部指向专用临时目录。脚本在内存生成标明SYNTHETIC的Excel，与input四份基准不同。
+
+v2.4真实模型合成性能验证：`.venv/bin/python -B tools/workspace_v24_model_benchmark.py`。脚本使用独立18875/18876端口和临时数据目录，分别记录首次、重复、展示变化、小幅改价、整表重读及单位变化；调用现有Qwen端点，不改变共享模型部署。证据写入远端临时目录。

@@ -22,6 +22,9 @@ from .schemas import (ExchangeRate, TokenEquivalence, ModelCreate, OfficialPrice
                       SupplierWrite, SupplierReconciliationRequest)
 from .reconciliation import build_reconciliation, canonical_json, digest, pricing_basis_issue
 
+from .supplier_profiles import SupplierProfileStore, initialize_supplier_profiles
+from .supplier_baselines import SupplierBaselineStore, initialize_supplier_baselines
+
 EDITABLE_FIELDS = tuple(QuoteCreate.model_fields)
 
 
@@ -49,7 +52,7 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
 
 
-class WorkspaceStore:
+class WorkspaceStore(SupplierProfileStore, SupplierBaselineStore):
     """The legacy workspace_quote table is preserved, never rewritten or cleared."""
 
     def __init__(self, path: str | Path) -> None:
@@ -134,6 +137,8 @@ class WorkspaceStore:
                     self._conn.execute('CREATE TABLE IF NOT EXISTS pricing_supplier_alias (\n                    alias_key TEXT PRIMARY KEY, alias TEXT NOT NULL,\n                    supplier_id TEXT NOT NULL REFERENCES pricing_supplier(supplier_id))')
                     self._conn.execute('CREATE TABLE IF NOT EXISTS pricing_supplier_mapping (\n                    supplier_id TEXT NOT NULL REFERENCES pricing_supplier(supplier_id),\n                    source_scope TEXT NOT NULL, entry_key TEXT NOT NULL,\n                    quote_id INTEGER NOT NULL REFERENCES pricing_quote(id) ON DELETE CASCADE,\n                    identity_hash TEXT NOT NULL,\n                    PRIMARY KEY(supplier_id,source_scope,entry_key))')
                     self._conn.execute('CREATE TABLE IF NOT EXISTS pricing_supplier_update (\n                    import_id TEXT PRIMARY KEY, request_hash TEXT NOT NULL,\n                    metadata TEXT NOT NULL, created_at TEXT NOT NULL)')
+                    initialize_supplier_profiles(self._conn)
+                    initialize_supplier_baselines(self._conn)
                     initial = self._default_context()
                     self._conn.execute("INSERT OR IGNORE INTO pricing_context VALUES (1,1,?,?)",
                                        (_json(initial), "1970-01-01T00:00:00+00:00"))

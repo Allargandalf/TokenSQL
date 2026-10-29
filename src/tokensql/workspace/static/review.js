@@ -23,12 +23,116 @@
   let reviewBusy = false;
   let selectedUploads = new Set();
   let pollGeneration = 0;
-  let memory = { revision: 0, rules: [] };
   let sessionGeneration = 0;
   const historyAnchors = new Map();
   const renderedReplies = new Set();
   const readyStatuses = new Set(["ready", "review"]);
   const waitingStatus = "waiting_for_input";
+
+
+  const supplierDrafts = new Map();
+  let supplierRouteGeneration = 0, activeDefaultPrompt = "", supplierContext = null, sessionItems = [];
+  function fillConversationSuppliers() {
+    const select = $("conversationSupplier"), active = state.supplierId || select.value;
+    select.replaceChildren(node("option", { text: "选择供应商" })); select.firstChild.value = "";
+    state.catalog.suppliers.forEach((supplier) => { const item = node("option", { text: supplier.name }); item.value = supplier.supplier_id; select.append(item); });
+    select.value = active || "";
+  }
+  function rememberSupplier(id) {
+    state.supplierId = id || null;
+    $("conversationSupplier").value = id || "";
+    const url = new URL(window.location.href);
+    if (id) url.searchParams.set("supplier", id); else { url.searchParams.delete("supplier"); url.searchParams.delete("scope"); }
+    window.history.replaceState(null, "", url);
+  }
+  function stashSupplierDraft() {
+    supplierDrafts.set(state.supplierId || "", { files: [...state.files], uploads: [...selectedUploads], prompt: els.prompt.value,
+      scope: $("importSourceScope").value, persist: $("persistProfile").checked, remember: $("rememberPrompt").checked,
+      updateRequest: nextUpdateRequest, fullReparse: $("fullReparse").checked });
+  }
+  function restoreSupplierDraft(id) {
+    const draft = supplierDrafts.get(id || "");
+    state.files = [...(draft?.files || [])]; selectedUploads = new Set(draft?.uploads || []);
+    els.prompt.value = draft?.prompt || ""; $("importSourceScope").value = draft?.scope || "";
+    $("fullReparse").checked = draft?.fullReparse ?? false;
+    $("persistProfile").checked = draft?.persist ?? true; $("rememberPrompt").checked = draft?.remember ?? false;
+    nextUpdateRequest = draft?.updateRequest || null;
+    $("preparedUpdateNotice").hidden = !nextUpdateRequest;
+    $("supplierUpdateButton").textContent = nextUpdateRequest ? "更新模式已准备" : "更新供应商报价";
+    if (nextUpdateRequest) $("preparedUpdateText").textContent = "待更新：" + (state.catalog.suppliers.find((s) => s.supplier_id === id)?.name || "") + " / " + nextUpdateRequest.source_scope;
+    renderFileChips();
+  }
+  function applySupplierProfile(profile, sourceScope = $("importSourceScope").value.trim() || "default") {
+    const previousDefault = activeDefaultPrompt;
+    const source = profile?.sources?.[sourceScope];
+    activeDefaultPrompt = source?.default_prompt ?? profile?.default_prompt ?? "";
+    const list = $("supplierSourceScopes"); list.replaceChildren();
+    Object.keys(profile?.sources || {}).forEach((name) => { const item = node("option"); item.value = name; list.append(item); });
+    if (!els.prompt.value.trim() || els.prompt.value === previousDefault) els.prompt.value = activeDefaultPrompt;
+    const name = state.catalog.suppliers.find((s) => s.supplier_id === state.supplierId)?.name;
+    $("supplierContextSummary").textContent = name ? name + " · " + (sourceScope === "default" ? "默认系列" : sourceScope) + (profile ? " · 档案 v" + profile.revision : "") : "选择供应商，继续对应对话";
+    $("continueSupplierSessionButton").hidden = !state.supplierId;
+    $("supplierLatestButton").hidden = !(supplierContext?.recent_supplier_result || supplierContext?.recent_job);
+  }
+  async function refreshSupplierProfile() {
+    if (!state.supplierId) { applySupplierProfile(null); return; }
+    const id = state.supplierId, sourceScope = $("importSourceScope").value.trim() || "default";
+    const profile = await api("/suppliers/" + encodeURIComponent(id) + "/profile?source_scope=" + encodeURIComponent(sourceScope));
+    if (state.supplierId === id && ($("importSourceScope").value.trim() || "default") === sourceScope) { applySupplierProfile(profile, sourceScope); const url = new URL(window.location.href); url.searchParams.set("scope", sourceScope); window.history.replaceState(null, "", url); }
+  }
+  async function routeSupplier(id, { newRound = false, scope: requestedScope = null } = {}) {
+    if (state.submitting) { $("conversationSupplier").value = state.supplierId || ""; return; }
+    const oldJob = currentJob, oldSupplier = state.supplierId;
+    stashSupplierDraft();
+    const generation = ++supplierRouteGeneration;
+    ++pollGeneration; state.agentBusy = false; state.sessionRestoring = true; updateComposer();
+    try {
+      if (!id) {
+        rememberSupplier(null); supplierContext = null; activeDefaultPrompt = ""; restoreSupplierDraft(null);
+        await restoreSession(null, { force: true }); applySupplierProfile(null); await loadFiles(); return;
+      }
+      const draft = supplierDrafts.get(id), sourceScope = requestedScope || draft?.scope || "default";
+      const result = await api("/agent/suppliers/" + encodeURIComponent(id) + "/session", {
+        method: "POST", body: JSON.stringify({ source_scope: sourceScope, new_round: newRound }),
+      });
+      if (generation !== supplierRouteGeneration) return;
+      supplierContext = result; rememberSupplier(id); activeDefaultPrompt = "";
+      restoreSupplierDraft(id); $("importSourceScope").value = sourceScope === "default" ? "" : sourceScope;
+      applySupplierProfile(result.profile, sourceScope);
+      const routeUrl = new URL(window.location.href); routeUrl.searchParams.set("scope", sourceScope); window.history.replaceState(null, "", routeUrl);
+      await restoreSession(result.conversation_id, { force: true });
+      if (generation !== supplierRouteGeneration) return;
+      await loadFiles();
+      if (currentJob?.status === waitingStatus && !draft?.prompt) els.prompt.value = "";
+      if (result.waiting_job && (!currentJob || currentJob.id !== result.waiting_job.id)) await resumeJob(result.waiting_job);
+      if (newRound) { $("fullReparse").checked = false; $("rememberPrompt").checked = false; toast("已开启供应商新一轮对话"); }
+    } catch (error) {
+      if (generation === supplierRouteGeneration) {
+        rememberSupplier(oldSupplier); state.sessionRestoring = false;
+        if (oldJob) await resumeJob(oldJob); else updateComposer();
+        toast(error.message, true);
+      }
+    } finally { if (generation === supplierRouteGeneration) { state.sessionRestoring = false; updateComposer(); } }
+  }
+  window.addEventListener("tokensql:catalog", fillConversationSuppliers);
+  window.addEventListener("tokensql:profile-saved", (event) => { if (event.detail.supplier_id === state.supplierId) refreshSupplierProfile().catch((error) => toast(error.message, true)); });
+  $("conversationSupplier").addEventListener("change", () => routeSupplier($("conversationSupplier").value));
+  $("importSourceScope").addEventListener("change", () => refreshSupplierProfile().catch((error) => toast(error.message, true)));
+  $("continueSupplierSessionButton").addEventListener("click", () => routeSupplier(state.supplierId));
+  $("supplierLatestButton").addEventListener("click", async () => {
+    const job = supplierContext?.recent_supplier_result || supplierContext?.recent_job;
+    if (!job) return;
+    try {
+      const latest = await api("/imports/" + encodeURIComponent(job.id));
+      if (readyStatuses.has(latest.status)) await openReview(latest);
+      else { const changes = latest.changes || {}; toast((latest.status === "confirmed" ? "最近已确认：" : "最近任务：") + "新增 " + (changes.added || 0) + " · 修改 " + (changes.updated || 0) + " · 删除 " + (changes.deleted || 0)); }
+    } catch (error) { toast(error.message, true); }
+  });
+  $("providerFilter").addEventListener("change", () => {
+    const supplier = state.catalog.suppliers.find((item) => item.name === $("providerFilter").value);
+    if (supplier) routeSupplier(supplier.supplier_id);
+  });
+  fillConversationSuppliers();
 
   function latestJob(jobs, sessionId = undefined) {
     return (jobs || []).filter((job) => !["cancelled", "confirmed"].includes(job.status) &&
@@ -63,10 +167,11 @@
 
   async function loadSessions() {
     const result = await api("/agent/sessions");
+    sessionItems = result.items || [];
     const select = $("sessionSelect");
     select.replaceChildren(node("option", { text: "新会话" }));
     select.firstChild.value = "";
-    (result.items || []).forEach((session) => {
+    (result.items || []).filter((session) => !state.supplierId || session.supplier_id === state.supplierId || session.id === state.conversationId).forEach((session) => {
       const option = node("option", { text: session.title || session.id });
       option.value = session.id;
       select.append(option);
@@ -77,8 +182,9 @@
     select.value = state.conversationId || "";
   }
 
-  async function restoreSession(id) {
-    if (state.agentBusy) return;
+  async function restoreSession(id, { force = false } = {}) {
+    if (state.agentBusy && !force) return;
+    if (force) state.agentBusy = false;
     const generation = ++sessionGeneration;
     ++pollGeneration; currentJob = null; renderedReplies.clear();
     $("reviewDialog").close(); $("jobStrip").hidden = true; $("waitingPanel").hidden = true;
@@ -110,6 +216,11 @@
   }
 
   async function resumeJob(job) {
+    if (job.source_comparison_available && !job.source_comparison) {
+      const session = state.conversationId, generation = sessionGeneration;
+      job = await api("/imports/" + encodeURIComponent(job.id));
+      if (session !== state.conversationId || generation !== sessionGeneration) return;
+    }
     showJob(job);
     if (job.status === waitingStatus) { renderJobReply(job); lockComposer(false); return; }
     if (readyStatuses.has(job.status)) { await openReview(job); return; }
@@ -151,6 +262,10 @@
     $("inputFiles").querySelectorAll("input[type=checkbox]").forEach((input) => { input.disabled = blocked && !input.checked; });
     els.prompt.placeholder = waiting ? "回答上方问题，继续处理原文件（无需重新上传）…" : "输入指令，或拖入 / 粘贴文件…";
     els.send.setAttribute("aria-label", waiting ? "发送补充回答" : "发送");
+    $("conversationSupplier").disabled = state.submitting || state.sessionRestoring;
+    $("providerFilter").disabled = state.submitting || state.sessionRestoring;
+    $("importSourceScope").disabled = blocked;
+    $("continueSupplierSessionButton").disabled = state.submitting || state.sessionRestoring;
     $("continueUnknownButton").disabled = state.agentBusy || state.sessionRestoring;
     els.send.disabled = state.agentBusy || state.sessionRestoring || els.agentStatus.classList.contains("is-offline");
     $("composerHint").textContent = waiting ? "补充回答沿用当前任务、会话和原文件；若要添加文件，请先取消或新建会话。" : "";
@@ -167,11 +282,18 @@
   }
 
   function showJob(job) {
+    const changedJob = currentJob?.id !== job.id;
     currentJob = job;
+    if (changedJob) {
+      if (typeof job.full_reparse === "boolean") $("fullReparse").checked = job.full_reparse;
+      if (typeof job.persist_profile === "boolean") $("persistProfile").checked = job.persist_profile;
+      if (typeof job.remember_prompt === "boolean") $("rememberPrompt").checked = job.remember_prompt;
+    }
     const ready = readyStatuses.has(job.status), waiting = job.status === waitingStatus;
     $("jobStrip").hidden = job.status === "cancelled" || job.status === "confirmed";
     $("jobStatus").textContent = waiting ? "待补充 " + (job.questions || []).length + " 项" : ready ? "候选方案已就绪，等待人工审核" : job.status === "failed" ? "任务失败，可补充说明或取消并退回文件" : job.status === "queued" ? "任务排队中…" : "OpenCode 正在分析文件…";
     $("reviewOpenButton").hidden = !ready;
+    window.TokenSQLSourceComparison?.renderMetrics($("jobReadingSummary"), job.metrics || {}, job.context_usage || {}, job.reading_plan || {});
     $("abortButton").textContent = waiting || job.status === "failed" ? "取消并退回文件" : ready ? "取消草案" : "中止";
     $("waitingPanel").hidden = !waiting;
     if (waiting) {
@@ -307,6 +429,8 @@
     if (state.agentBusy || state.sessionRestoring || (!prompt && !state.files.length && !selectedUploads.size && !waitingSupplierId)) return;
     if (currentJob?.status === waitingStatus) { await respondPrompt(prompt || (waitingSupplierId ? "已确认本批供应商，请继续预审。" : "")); return; }
     if (currentJob && !terminal.has(currentJob.status)) { toast("请先确认或取消当前草案。", true); return; }
+    const requestContext = { full_reparse: $("fullReparse").checked, conversation_id: state.conversationId, supplier_id: nextUpdateRequest?.supplier_id || state.supplierId, source_scope: nextUpdateRequest?.source_scope || $("importSourceScope").value.trim() || null, persist_profile: $("persistProfile").checked, remember_prompt: $("rememberPrompt").checked };
+    state.submitting = true;
     const sentFiles = [...state.files];
     const existingUploads = [...selectedUploads];
     lockComposer(true);
@@ -325,10 +449,10 @@
       await captureHistoryAnchor(generation);
       const job = await api("/imports/start", { method: "POST", body: JSON.stringify({
         upload_ids: [...existingUploads, ...uploaded], prompt: prompt || "请根据附件及已确认规则生成候选方案，所有修改等待审核。",
-        conversation_id: state.conversationId,
+        ...requestContext,
         ...(nextUpdateRequest ? { supplier_id: nextUpdateRequest.supplier_id, update_request: nextUpdateRequest } : {}),
       }) });
-      startedJob = job; nextUpdateRequest = null; $("preparedUpdateNotice").hidden = true; $("supplierUpdateButton").textContent = "更新供应商报价";
+      startedJob = job; state.submitting = false; updateComposer(); nextUpdateRequest = null; $("preparedUpdateNotice").hidden = true; $("supplierUpdateButton").textContent = "更新供应商报价";
       els.prompt.value = ""; selectedUploads.clear();
       showJob(job); await loadFiles();
       await pollJob(job.id || job.import_id, progress, generation);
@@ -344,7 +468,7 @@
         if (generation === pollGeneration) toast(error.message, true);
         if (!uploaded.length) { state.files = sentFiles; renderFileChips(); }
       }
-    } finally { if (generation === pollGeneration) lockComposer(false); historyAnchors.delete(generation); await checkAgent(); await loadFiles().catch(() => {}); }
+    } finally { state.submitting = false; if (generation === pollGeneration) lockComposer(false); historyAnchors.delete(generation); await checkAgent(); await loadFiles().catch(() => {}); }
   }
 
   async function respondPrompt(prompt) {
@@ -361,7 +485,7 @@
       await captureHistoryAnchor(generation);
       if (generation !== pollGeneration) return;
       const job = await api(`/imports/${encodeURIComponent(waiting.id)}/respond`, {
-        method: "POST", body: JSON.stringify({ expected_revision: waiting.revision, prompt, ...(waitingSupplierId ? { supplier_id: waitingSupplierId } : {}) }),
+        method: "POST", body: JSON.stringify({ expected_revision: waiting.revision, prompt, persist_profile: $("persistProfile").checked, remember_prompt: $("rememberPrompt").checked, ...(waitingSupplierId ? { supplier_id: waitingSupplierId } : {}) }),
       });
       if (generation !== pollGeneration) return;
       if (els.prompt.value.trim() === prompt) els.prompt.value = "";
@@ -590,6 +714,26 @@
 
   function renderPreview(job) {
     const preview = job.preview || {};
+    window.TokenSQLSourceComparison?.render($("reviewSourceComparison"), { comparison: job.source_comparison, metrics: job.metrics || {}, readingPlan: job.reading_plan || {}, contextUsage: job.context_usage || {} });
+    const officialChanges = job.official_catalog_changes || [];
+    if (officialChanges.length) {
+      const container = $("reviewSourceComparison"); container.hidden = false;
+      const list = node("section", { className: "official-source-changes" }, [node("h3", { text: "原表官网价更新" })]);
+      const priceText = (price) => {
+        const unit = state.pricingUnits.items.find((item) => item.id === price?.pricing_unit_id);
+        return String(price?.amount ?? "—") + " " + (unit?.label || [price?.currency || "", price?.unit || price?.pricing_unit_id || ""].filter(Boolean).join(" / "));
+      };
+      officialChanges.forEach((change) => {
+        const before = change.before || {}, after = change.after || {};
+        const fields = (change.changed_fields || []).join("、");
+        list.append(node("article", { className: "official-source-change" }, [
+          node("strong", { text: (after.model_id || before.model_id || change.official_price_id) + " · " + (after.billing_item || before.billing_item || "") }),
+          node("p", { text: priceText(before) + " → " + priceText(after) }),
+          node("details", {}, [node("summary", { text: "变更字段：" + fields }), node("pre", { text: JSON.stringify({ before, after }, null, 2) })]),
+        ]));
+      });
+      container.append(list);
+    }
     const target = $("reviewPreview"); target.replaceChildren(node("strong", { text: "原始数据校验预览 · 正式数据尚未变更" }));
     const changes = preview.changes || job.changes || {};
     target.append(node("p", { text: `新增 ${changes.added ?? (reviewBundle.create || []).length} · 更新 ${changes.updated ?? (reviewBundle.update || []).length} · 删除 ${changes.deleted ?? (reviewBundle.delete || []).length}` }));
@@ -609,6 +753,11 @@
   }
 
   async function openReview(job) {
+    if (job.source_comparison_available && !job.source_comparison) {
+      const generation = sessionGeneration;
+      job = await api("/imports/" + encodeURIComponent(job.id));
+      if (generation !== sessionGeneration) return;
+    }
     if (!readyStatuses.has(job.status)) {
       showJob(job); $("reviewDialog").close();
       if (job.status === waitingStatus) renderJobReply(job);
@@ -618,6 +767,9 @@
     // Supplier updates reconcile the uploaded proposal into a separate applied bundle.
     // Edit the source rows so re-preview retains matched updates and missing-row deletes.
     currentJob = job; reviewBundle = JSON.parse(JSON.stringify(job.proposal_bundle ?? job.bundle ?? {})); reviewDirty = false; reconciliationDirty = false;
+    $("reviewProfileSettings").hidden = job.intent === "official_price_lookup" || !job.supplier_id && !(reviewBundle.create || []).length && !(reviewBundle.update || []).length;
+    $("reviewPersistProfile").checked = job.persist_profile ?? true;
+    $("reviewRememberPrompt").checked = job.remember_prompt ?? false;
     reviewDecisions = job.reconciliation_request?.decisions || [];
     $("reviewMeta").textContent = `草案 ${job.id} · 版本 ${job.revision} · ${(job.files || []).map((file) => file.filename || file.name || "").join("、") || "人工编辑"}`;
     renderReviewSections(); renderPreview(job);
@@ -642,9 +794,10 @@
     reviewBusy = true; $("previewReviewButton").disabled = true; $("confirmReviewButton").disabled = true;
     try {
       const bundle = parseBundle($("reviewBundle").value);
-      if (reviewDirty || reconciliationDirty) {
+      const preferencesDirty = $("reviewPersistProfile").checked !== (currentJob.persist_profile ?? true) || $("reviewRememberPrompt").checked !== (currentJob.remember_prompt ?? false);
+      if (reviewDirty || reconciliationDirty || preferencesDirty) {
         const job = await api(`/imports/${encodeURIComponent(currentJob.id)}/proposal`, {
-          method: "PATCH", body: JSON.stringify({ expected_revision: currentJob.revision, ...(reviewDirty ? { bundle } : {}), ...(reconciliationDirty ? { decisions: reviewDecisions } : {}) }),
+          method: "PATCH", body: JSON.stringify({ expected_revision: currentJob.revision, persist_profile: $("reviewPersistProfile").checked, remember_prompt: $("reviewRememberPrompt").checked, ...(reviewDirty ? { bundle } : {}), ...(reconciliationDirty ? { decisions: reviewDecisions } : {}) }),
         });
         await openReview(job);
       }
@@ -663,8 +816,8 @@
       const job = await api(`/imports/${encodeURIComponent(currentJob.id)}/confirm`, {
         method: "POST", body: JSON.stringify({ expected_revision: currentJob.revision, idempotency_key: `workspace-${currentJob.id}` }),
       });
-      ++pollGeneration; showJob(job); $("reviewDialog").close();
-      appendMessage("assistant", "已确认入库，文件已归档。已确认修正按作用域保存。", [], job.changes || {});
+      ++pollGeneration; showJob(job); $("reviewDialog").close(); $("fullReparse").checked = false; $("rememberPrompt").checked = false;
+      appendMessage("assistant", "已确认入库，文件已归档。已确认修正已按本次导入设置处理。", [], job.changes || {});
       await Promise.all([loadQuotes({ quiet: true }), loadCatalog(), loadFiles(), loadSessions()]);
       toast("审核方案已确认");
     } catch (error) {
@@ -689,7 +842,7 @@
       showJob(job); $("reviewDialog").close();
       els.conversation.querySelectorAll(".run-progress").forEach((progress) => progress.closest(".message")?.remove());
       await loadFiles();
-      appendMessage("assistant", "任务已取消，文件已退回输入区。正式报价与纠错记忆未变更。"); toast("已取消");
+      appendMessage("assistant", "任务已取消，文件已退回输入区。正式报价与供应商档案未变更。"); toast("已取消");
     } catch (error) {
       if (generation === pollGeneration) {
         toast("取消请求未确认完成，正在恢复任务状态：" + error.message, true);
@@ -756,42 +909,6 @@
     } catch (error) { toast(error.message, true); }
   }
 
-  function renderMemory() {
-    const target = $("memoryRules"); target.replaceChildren();
-    memory.rules.forEach((rule, index) => {
-      const enabled = node("input", { type: "checkbox" }); enabled.checked = rule.enabled !== false;
-      enabled.addEventListener("change", () => { rule.enabled = enabled.checked; });
-      const scope = node("input", { type: "text" }); scope.value = typeof rule.scope === "object" ? JSON.stringify(rule.scope) : rule.scope || "";
-      scope.setAttribute("aria-label", `规则 ${index + 1} 作用域`);
-      scope.addEventListener("input", () => { rule.scope = scope.value; });
-      const text = node("textarea"); text.rows = 3; text.value = rule.text || ""; text.setAttribute("aria-label", `规则 ${index + 1} 内容`);
-      text.addEventListener("input", () => { rule.text = text.value; });
-      const remove = node("button", { className: "text-button danger", type: "button", text: "删除" });
-      remove.addEventListener("click", () => { memory.rules.splice(index, 1); renderMemory(); });
-      target.append(node("section", { className: "memory-rule" }, [
-        node("div", { className: "review-section-heading" }, [node("label", {}, [enabled, " 启用"]), remove]),
-        node("label", {}, ["作用域（如 supplier:供应商 / model:唯一 ID）", scope]), text,
-        node("small", { text: `来源：${rule.source || "人工编辑"}${rule.import_id ? " · 草案 " + rule.import_id : ""}` }),
-      ]));
-    });
-    if (!memory.rules.length) target.append(node("p", { text: "尚无已确认纠错规则。" }));
-  }
-
-  async function openMemory() {
-    try {
-      memory = await api("/agent/memory"); renderMemory(); $("memoryError").textContent = ""; $("memoryDialog").showModal();
-    } catch (error) { toast(error.message, true); }
-  }
-
-  async function saveMemory() {
-    $("saveMemoryButton").disabled = true;
-    try {
-      memory = await api("/agent/memory", { method: "PATCH", body: JSON.stringify({ expected_revision: memory.revision, rules: memory.rules }) });
-      renderMemory(); $("memoryDialog").close(); toast("纠错记忆已保存");
-    } catch (error) { $("memoryError").textContent = error.message; }
-    finally { $("saveMemoryButton").disabled = false; }
-  }
-
   $("reviewOpenButton").addEventListener("click", async () => {
     try { await openReview(await api(`/imports/${encodeURIComponent(currentJob.id)}`)); } catch (error) { toast(error.message, true); }
   });
@@ -800,23 +917,19 @@
   $("abortButton").addEventListener("click", cancelCurrent);
   $("previewReviewButton").addEventListener("click", saveReview);
   $("confirmReviewButton").addEventListener("click", confirmReview);
+  $("reviewPersistProfile").addEventListener("change", () => { $("persistProfile").checked = $("reviewPersistProfile").checked; });
+  $("reviewRememberPrompt").addEventListener("change", () => { $("rememberPrompt").checked = $("reviewRememberPrompt").checked; });
   $("reviewBundle").addEventListener("input", () => { reviewDirty = true; });
   $("applyReviewJsonButton").addEventListener("click", () => {
     try { reviewBundle = parseBundle($("reviewBundle").value); reviewDirty = true; renderReviewSections(); $("reviewIssues").textContent = ""; }
     catch (error) { $("reviewIssues").textContent = error.message; }
   });
   $("sessionSelect").addEventListener("change", () => restoreSession($("sessionSelect").value).catch((error) => toast(error.message, true)));
-  $("newSessionButton").addEventListener("click", () => restoreSession(null));
+  $("newSessionButton").addEventListener("click", () => state.supplierId ? routeSupplier(state.supplierId, { newRound: true }) : restoreSession(null));
   $("catalogButton").addEventListener("click", openCatalog);
   $("closeCatalogButton").addEventListener("click", () => $("catalogDialog").close());
   $("newModelButton").addEventListener("click", () => manualDraft("models"));
   $("newOfficialButton").addEventListener("click", () => manualDraft("official_prices"));
-  $("memoryButton").addEventListener("click", openMemory);
-  $("closeMemoryButton").addEventListener("click", () => $("memoryDialog").close());
-  $("saveMemoryButton").addEventListener("click", saveMemory);
-  $("addMemoryRuleButton").addEventListener("click", () => {
-    memory.rules.push({ id: `manual-${Date.now()}`, scope: "global", text: "", enabled: true, source: "manual" }); renderMemory();
-  });
   $("reviewDialog").addEventListener("keydown", (event) => { if (event.key === "Enter" && event.target.tagName === "INPUT") event.preventDefault(); });
 
   $("continueUnknownButton").addEventListener("click", () => {
@@ -827,37 +940,45 @@
   });
   $("supplierUpdateButton").addEventListener("click", async () => {
     if (!canAttachFiles()) return;
-    await loadCatalog(); supplierOptions($("updateSupplier")); $("supplierUpdateError").textContent = ""; $("supplierUpdateDialog").showModal();
+    await loadCatalog(); supplierOptions($("updateSupplier")); if (state.supplierId) $("updateSupplier").value = state.supplierId; if ($("importSourceScope").value) $("updateSourceScope").value = $("importSourceScope").value; $("supplierUpdateError").textContent = ""; $("supplierUpdateDialog").showModal();
   });
   $("clearPreparedUpdateButton").addEventListener("click", () => { nextUpdateRequest = null; $("preparedUpdateNotice").hidden = true; $("supplierUpdateButton").textContent = "更新供应商报价"; });
   $("closeSupplierUpdateButton").addEventListener("click", () => $("supplierUpdateDialog").close());
-  $("supplierUpdateForm").addEventListener("submit", (event) => {
+  $("supplierUpdateForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     if (!$("supplierUpdateForm").reportValidity()) return;
     const mode = $("updateMode").value;
     const sheets = csvValues($("updateSheets").value);
     if (mode === "full" && (!$("updateCompleteRead").checked || !sheets.length)) { $("supplierUpdateError").textContent = "完整替换必须确认完整范围，并明确覆盖工作表；部分解析不能推导删除。"; return; }
-    nextUpdateRequest = { supplier_id: $("updateSupplier").value, source_scope: $("updateSourceScope").value.trim(), mode,
+    const updateSupplierId = $("updateSupplier").value;
+    if (updateSupplierId !== state.supplierId) { await routeSupplier(updateSupplierId, { scope: $("updateSourceScope").value.trim() }); if (state.supplierId !== updateSupplierId) return; }
+    nextUpdateRequest = { supplier_id: updateSupplierId, source_scope: $("updateSourceScope").value.trim(), mode,
       scope_confirmed: $("updateScopeConfirmed").checked, complete_read: $("updateCompleteRead").checked,
       covered_sheets: sheets, expected_sheets: sheets, model_ids: csvValues($("updateModels").value), supplier_model_ids: csvValues($("updateChannels").value),
       source_version: $("updateVersion").value.trim() || null, source_effective_date: $("updateEffectiveDate").value || null,
       latest_confirmed: $("updateLatestConfirmed").checked, allow_rollback: $("updateAllowRollback").checked };
+    $("importSourceScope").value = nextUpdateRequest.source_scope; await refreshSupplierProfile().catch((error) => toast(error.message, true));
     $("supplierUpdateDialog").close(); $("supplierUpdateButton").textContent = "更新模式已准备";
     const supplier = state.catalog.suppliers.find((item) => item.supplier_id === nextUpdateRequest.supplier_id);
     els.prompt.value = `更新 ${supplier?.name || "所选供应商"} 在「${nextUpdateRequest.source_scope}」内的报价。${mode === "full" ? "按确认完整范围预审新增、修改及缺失删除。" : "增量更新，未出现的旧报价保留。"} 保留原报价ID，所有修改等待审核确认。`;
     $("preparedUpdateText").textContent = `待更新：${supplier?.name || "供应商"} / ${nextUpdateRequest.source_scope} / ${mode === "full" ? "完整替换" : "增量"}`; $("preparedUpdateNotice").hidden = false;
     els.filePicker.click(); els.prompt.focus();
   });
-  window.TokenSQLReview = { sendPrompt, lookupOfficial, canAttachFiles, showJob, openReview, get currentJob() { return currentJob; } };
+  window.TokenSQLReview = { sendPrompt, lookupOfficial, canAttachFiles, showJob, openReview, routeSupplier, refreshSupplierProfile, get supplierContext() { return supplierContext; }, get currentJob() { return currentJob; } };
   async function initialize() {
     const generation = sessionGeneration;
     state.sessionRestoring = true; updateComposer();
     try {
-      const sessionId = new URL(window.location.href).searchParams.get("session");
+      const url = new URL(window.location.href), sessionId = url.searchParams.get("session"), supplierId = url.searchParams.get("supplier");
       rememberSession(sessionId);
-      await loadSessions(); await loadFiles();
+      await loadCatalog(); fillConversationSuppliers(); await loadSessions(); await loadFiles();
       if (generation !== sessionGeneration) return;
-      if (sessionId) { await restoreSession(sessionId); return; }
+      if (supplierId && state.catalog.suppliers.some((supplier) => supplier.supplier_id === supplierId)) { await routeSupplier(supplierId, { scope: url.searchParams.get("scope") || "default" }); return; }
+      if (sessionId) {
+        const session = sessionItems.find((item) => item.id === sessionId);
+        if (session?.supplier_id) { rememberSupplier(session.supplier_id); await refreshSupplierProfile(); }
+        await restoreSession(sessionId); return;
+      }
       const result = await api("/imports");
       if (generation !== sessionGeneration) return;
       const pending = latestJob((result.items || []).filter((job) => !terminal.has(job.status)));

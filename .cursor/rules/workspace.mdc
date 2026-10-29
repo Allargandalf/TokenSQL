@@ -3,7 +3,8 @@ description: TokenSQL remote development and reviewed OpenCode pricing maintenan
 alwaysApply: true
 ---
 
-Follow plan.md, AGENTS.md and docs/pricing_conditions_contract.md.
+Follow plan.md, AGENTS.md, docs/pricing_conditions_contract.md and
+docs/supplier_routing.md.
 Official stable IDs, typed conditions and explicit discount scopes preserve raw data;
 unknown is not all. Show one supplier price and one zhe discount; expand only
 effective rules without writes. Item exceptions override model defaults; conflicts
@@ -48,7 +49,11 @@ and re-confirm stale revisions. No per-update whole-DB backup.
 Do not restore removed fixed parsing pipelines. Never automatically import samples/backups.
 User-initiated official-price lookup uses a new scoped OpenCode session and
 the official-source index, fetches primary evidence, then human-reviewed writes.
-Confirmed corrections alone may become scoped memory outside the repository.
+Supplier profiles own confirmed naming mappings, unit/table meanings and
+source-series preferences. Keep volatile quote corrections in batch evidence.
+Load the selected supplier/source profile and persist its default conversation.
+Reuse confirmed source interpretations through content-based workbook diffs,
+then reconcile the complete current candidates with the latest database.
 
 Root coordinates and independently verifies; coding/review Subagents use the
 explicitly selected gpt-6.1-sol ultra; root uses Astra. Preserve unrelated changes.

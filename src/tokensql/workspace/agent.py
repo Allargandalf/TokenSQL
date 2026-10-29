@@ -9,13 +9,17 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import time
 from typing import Any, Sequence
 from uuid import uuid4
 
 import httpx
 
-from .memory import AgentMemory, atomic_json
+from .memory import (AgentMemory, atomic_json, migrate_supplier_memory,
+                     supplier_profile_context, supplier_profile_prompt, _supplier_id)
 from .workflow import WorkflowService
+from .store import RevisionConflictError
+from .source_reading import prepare_source_reading
 
 _SESSION_ID = re.compile(r"^ses[A-Za-z0-9_-]+$")
 
@@ -95,15 +99,162 @@ class OpenCodeAgentManager:
         self.memory = AgentMemory(config.agent_dir)
         self.workflow = WorkflowService(config, store, self.memory)
         self.workflow.manager = self
+        migrate_supplier_memory(self.memory, self.store, self.workflow.state["jobs"])
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._supplier_session_locks: dict[str, asyncio.Lock] = {}
         self._active: set[str] = set()
+        self._history_raw: dict[str, list[dict[str, Any]]] = {}
         self._sessions_path = config.agent_dir / "sessions.json"
         self._sessions = json.loads(self._sessions_path.read_text()) if self._sessions_path.exists() else {}
 
     def _remember_session(self, session_id: str, title: str = "") -> None:
         self._sessions.setdefault(session_id, {"id": session_id, "title": title or "TokenSQL pricing review"})
         atomic_json(self._sessions_path, self._sessions)
+
+    def _default_supplier_session(self, supplier_id: str) -> dict[str, Any] | None:
+        return next((item for item in reversed(list(self._sessions.values()))
+                     if item.get("supplier_id") == supplier_id and item.get("is_default")
+                     and item.get("intent") != "official_price_lookup"), None)
+
+    def _supplier_summary(self, supplier_id: str) -> str:
+        jobs = [job for job in self.workflow.state["jobs"].values()
+                if job.get("supplier_id") == supplier_id and job.get("intent") != "official_price_lookup"][-5:]
+        outcomes = [{"import_id": job["id"], "status": job["status"],
+                     "source_scope": job.get("source_scope", "default"), "changes": job.get("changes", {}),
+                     "question_summary": job.get("question_summary"), "updated_at": job.get("updated_at")}
+                    for job in jobs]
+        return ("Recent supplier task outcomes (history data only; business meanings come from the current profile):\n"
+                + json.dumps(outcomes, ensure_ascii=False, default=str))
+
+    async def supplier_session(self, supplier_id: str, *, source_scope: str = "default",
+                               new_round: bool = False) -> dict[str, Any]:
+        supplier = self.workflow._confirmed_supplier(supplier_id)
+        source_scope = source_scope.strip()
+        if not source_scope or len(source_scope) > 255:
+            raise ValueError("source_scope must contain 1 to 255 characters")
+        async with self._supplier_session_locks.setdefault(supplier_id, asyncio.Lock()):
+            current = self._default_supplier_session(supplier_id)
+            if new_round and current and any(job.get("conversation_id") == current["id"]
+                    and job.get("status") in {"preparing", "queued", "running", "waiting_for_input", "cancelling", "confirming", "committed"}
+                    for job in self.workflow.state["jobs"].values()):
+                raise RevisionConflictError("supplier conversation has an active task; respond, finish or cancel it before a new round")
+            if current is None or new_round:
+                title = supplier["name"]
+                async with self._client(15) as client:
+                    response = await client.post("/session", params=self._params(),
+                        json={"title": title, "permission": [
+                            {"permission": "question", "pattern": "*", "action": "deny"},
+                            {"permission": "webfetch", "pattern": "*", "action": "deny"},
+                            {"permission": "websearch", "pattern": "*", "action": "deny"}]})
+                    self._check(response, "create supplier session")
+                session_id = str(response.json().get("id", ""))
+                if not _SESSION_ID.fullmatch(session_id):
+                    raise OpenCodeAgentError("OpenCode returned an invalid session id")
+                if new_round and current and current["id"] == session_id:
+                    raise OpenCodeAgentError("OpenCode did not create a new conversation for the new round")
+                existing = self._sessions.get(session_id, {})
+                if existing.get("supplier_id") not in {None, supplier_id} or existing.get("intent") == "official_price_lookup":
+                    raise OpenCodeAgentError("OpenCode returned a session belonging to another scope")
+                for item in self._sessions.values():
+                    if item.get("supplier_id") == supplier_id:
+                        item["is_default"] = False
+                self._remember_session(session_id, title)
+                current = self._sessions[session_id]
+                current.update(title=title, supplier_id=supplier_id, intent="import", is_default=True,
+                               summary=self._supplier_summary(supplier_id), usage={"model_calls": 0, "prompt_chars": 0})
+                atomic_json(self._sessions_path, self._sessions)
+            session_id = current["id"]
+            jobs = [self.workflow.get(job["id"]) for job in self.workflow.state["jobs"].values()
+                    if job.get("supplier_id") == supplier_id and job.get("intent") != "official_price_lookup"]
+            waiting = next((job for job in reversed(jobs) if job.get("conversation_id") == session_id
+                            and job["status"] == "waiting_for_input"), None)
+            current_jobs = [job for job in jobs if job.get("conversation_id") == session_id]
+            active = next((job for job in reversed(current_jobs) if job["status"] in {
+                "preparing", "queued", "running", "waiting_for_input", "ready", "confirming", "committed"}), None)
+            return {"supplier_id": supplier_id, "conversation_id": session_id, "title": current["title"],
+                    "source_scope": source_scope, "profile": self.store.get_supplier_profile(supplier_id, source_scope),
+                    "recent_job": active or (current_jobs[-1] if current_jobs else None),
+                    "recent_supplier_result": jobs[-1] if jobs else None, "waiting_job": waiting,
+                    "session_summary": current.get("summary", ""), "context_usage": current.get("usage", {})}
+
+    async def resolve_supplier_session(self, supplier_id: str | None,
+                                       conversation_id: str | None) -> tuple[str | None, str | None]:
+        session = self._sessions.get(conversation_id, {})
+        bound = session.get("supplier_id")
+        if bound:
+            if supplier_id and supplier_id != bound:
+                raise ValueError("conversation belongs to another supplier; open the selected supplier conversation")
+            supplier_id = bound
+        if supplier_id and session.get("intent") == "official_price_lookup":
+            raise ValueError("official lookup conversations cannot be bound to a supplier import")
+        if supplier_id and conversation_id is None:
+            route = await self.supplier_session(supplier_id)
+            conversation_id = route["conversation_id"]
+        elif supplier_id and not bound:
+            history = [job for job in self.workflow.state["jobs"].values()
+                       if job.get("conversation_id") == conversation_id]
+            if any(job.get("supplier_id") != supplier_id or job.get("intent") == "official_price_lookup"
+                   for job in history):
+                raise ValueError("conversation has another scope; open the selected supplier conversation")
+            self._remember_session(conversation_id)
+            self._sessions[conversation_id].update(supplier_id=supplier_id, intent="import")
+            if self._default_supplier_session(supplier_id) is None:
+                self._sessions[conversation_id]["is_default"] = True
+            atomic_json(self._sessions_path, self._sessions)
+        return supplier_id, conversation_id
+
+    def adopt_confirmed_supplier(self, job: dict[str, Any]) -> None:
+        """A first reviewed supplier may acquire its original clean import conversation."""
+        if job.get("intent") == "official_price_lookup" or job.get("supplier_id"):
+            return
+        suppliers = self.store.list_suppliers()
+        resolved = set()
+        for update in job.get("profile_updates", []):
+            sid = update["supplier_id"]
+            if sid.startswith("pending-name:"):
+                sid = _supplier_id(self.store, {"supplier": sid[13:]})
+            if sid:
+                resolved.add(sid)
+        if len(resolved) != 1:
+            return
+        sid = resolved.pop()
+        job["supplier_id"] = sid
+        session_id = job.get("conversation_id")
+        session = self._sessions.get(session_id)
+        if session is None or session.get("intent") == "official_price_lookup" or session.get("supplier_id") not in {None, sid}:
+            return
+        history = [item for item in self.workflow.state["jobs"].values()
+                   if item["id"] != job["id"] and item.get("conversation_id") == session_id]
+        if any(item.get("supplier_id") != sid or item.get("intent") == "official_price_lookup" for item in history):
+            return
+        session.update(supplier_id=sid, intent="import", title=next(item["name"] for item in suppliers if item["supplier_id"] == sid))
+        if self._default_supplier_session(sid) is None:
+            session["is_default"] = True
+        atomic_json(self._sessions_path, self._sessions)
+
+    def _record_usage(self, identifier: str, body: Any, prompt_chars: int, model_seconds: float) -> None:
+        job = self.workflow._job(identifier)
+        tokens = (body.get("info") or {}).get("tokens") if isinstance(body, dict) else None
+        if not isinstance(tokens, dict):
+            tokens = None
+        usage = {"model_calls": 1, "semantic_requests": 1,
+                 "usage_scope": "current attempt's SDK semantic request",
+                 "model_calls_definition": "submitted SDK semantic requests; one request may include multiple LLM steps",
+                 "prompt_chars": prompt_chars, "submitted_message_chars": prompt_chars,
+                 "input_chars_measurement": "submitted system and user text; excludes history and workbook/tool reads",
+                 "model_seconds": round(model_seconds, 6), "tokens": tokens, "last_turn_tokens": tokens,
+                 "token_measurement": "sdk_last_turn" if tokens is not None else "unavailable",
+                 "task_tokens": None, "llm_steps": None, "task_token_measurement": "unavailable"}
+        self.workflow.update_job(identifier, context_usage=usage)
+        session_id = job.get("conversation_id")
+        if session_id:
+            current = self._sessions[session_id].setdefault("usage", {"model_calls": 0, "prompt_chars": 0})
+            current["model_calls"] = current.get("model_calls", 0) + 1
+            current["prompt_chars"] = current.get("prompt_chars", 0) + prompt_chars
+            current.update(last_prompt_chars=prompt_chars, last_tokens=tokens,
+                           token_measurement="sdk_last_turn" if tokens is not None else "unavailable")
+            atomic_json(self._sessions_path, self._sessions)
 
     def _mark_abort_needed(self, session_id: str, needed: bool) -> None:
         self._remember_session(session_id)
@@ -115,7 +266,9 @@ class OpenCodeAgentManager:
 
     async def submit(self, *, prompt: str, files: Sequence[AgentUpload] = (),
                      conversation_id: str | None = None, supplier_id: str | None = None,
-                     update_request: dict[str, Any] | None = None) -> AgentRun:
+                     update_request: dict[str, Any] | None = None, source_scope: str | None = None,
+                     persist_profile: bool = True, remember_prompt: bool = False,
+                     full_reparse: bool = False) -> AgentRun:
         if not prompt.strip():
             raise ValueError("prompt must not be blank")
         if conversation_id is not None and not _SESSION_ID.fullmatch(conversation_id):
@@ -126,7 +279,8 @@ class OpenCodeAgentManager:
         uploads = self.workflow.upload(files) if files else []
         job = await self.workflow.start(upload_ids=[item["id"] for item in uploads],
                                         prompt=prompt, conversation_id=conversation_id,
-                                        supplier_id=supplier_id, update_request=update_request)
+                                        supplier_id=supplier_id, update_request=update_request, source_scope=source_scope,
+                                        persist_profile=persist_profile, remember_prompt=remember_prompt, full_reparse=full_reparse)
         return self.get_run(job["id"])
 
     async def lookup_official_prices(self, *, model_id: str, billing_item: str | None = None,
@@ -239,6 +393,7 @@ class OpenCodeAgentManager:
             if not isinstance(value, list):
                 raise OpenCodeAgentError("OpenCode returned invalid history")
             self._remember_session(session_id)
+            self._history_raw[session_id] = value
             return self._project_messages(value)
 
     async def _create_session(self, client: httpx.AsyncClient, identifier: str) -> str:
@@ -284,6 +439,10 @@ class OpenCodeAgentManager:
             paths.append(target)
         suffix = "" if attempt == 1 else ".attempt-" + str(attempt)
         snapshot_path = self.config.agent_dir / "catalogs" / (identifier + suffix + ".json")
+        if (job.get("intent") != "official_price_lookup"
+                and job.get("_source_prepared_attempt") != job.get("attempt", 1)):
+            context = supplier_profile_context(self.store, job.get("supplier_id"), job.get("source_scope") or "default")
+            self.workflow.update_job(identifier, profile_context=context)
         catalog = self.store.catalog_snapshot()
         if job.get("update_request") is not None:
             catalog["supplier_update_request"] = dict(job["update_request"])
@@ -298,13 +457,36 @@ class OpenCodeAgentManager:
             reference = snapshot_path.with_suffix(".official-sources.md")
             reference.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
             reference.chmod(0o444)
+        if job.get("_source_changed_context") is not None:
+            context_path = directory / "changed_context.json"
+            atomic_json(context_path, job["_source_changed_context"])
+            context_path.chmod(0o444)
         return directory, snapshot_path, paths
 
-    def _system_prompt(self, directory: Path, snapshot: Path) -> str:
+    def _source_reading_prompt(self, job: dict[str, Any], directory: Path) -> str:
+        if job.get("intent") == "official_price_lookup":
+            return ""
+        canonical = ("\nFor workbook provenance use canonical source_ref only, such as Rates!A2:D2 or 'Rate Sheet'!A2:D2. "
+                     "Put header/unit explanations and quoted source text in note, never append annotations to source_ref. "
+                     "source_sheet is valid on supplier quotes; official prices carry the sheet in source_ref.\n")
+        if job.get("_source_changed_context") is None:
+            return canonical + "\nCSV/TSV sources use the logical sheet name CSV for coverage and source_sheet; retain their original filename as source evidence.\n"
+        return canonical + ("\nLATEST source-difference reading policy for this exact attempt (overrides full-workbook reading instructions):\n"
+                "The host has already read and compared complete old/new source tables deterministically and retained confirmed unchanged interpretations. "
+                "Read ONLY the compact changed-region package at " + str(directory / "changed_context.json") + ". "
+                "Current rows marked parse=true are the only rows to interpret. Old rows, headers, footnotes and neighboring rows are context, never extra candidate quotations. "
+                "Do not open or re-read the full original workbooks or prior attempts. If this package lacks a necessary meaning, ask a structured clarification rather than inventing or silently expanding the parse scope. "
+                "Emit only current changed/new quotations and explicitly changed model/official metadata. Do not repeat unchanged entries; the host merges those before reconciliation. "
+                "Preserve current source filename, sheet and cell references from the package. Cell positions are evidence locations, never quote identities. "
+                "Report complete_read=true only if every parse=true region was understood; covered_sheets lists the changed sheets actually covered. "
+                "Full replacement authorization remains human-owned. The host combines reuse coverage with this changed-region coverage.\n")
+
+    def _system_prompt(self, directory: Path, snapshot: Path, job: dict[str, Any] | None = None) -> str:
         cli = f"{shlex.quote(str(self.config.python_bin))} -m tokensql.workspace.draft_cli"
         administrator = ("\nAdministrator context (latest application policy below takes precedence):\n"
                          + self.config.instructions if self.config.instructions else "")
-        return self.memory.prompt() + administrator + f"""
+        return (self.memory.prompt() + supplier_profile_prompt((job or {}).get("profile_context"))
+                + administrator) + f"""
 Trusted application policy:
 Your deliverable is exactly one proposal bundle OR a structured request for human clarification, never database changes.
 Use only this run directory for writable output: {directory}
@@ -406,6 +588,51 @@ When scope cannot be matched, retrieval fails, or price is ambiguous, return no 
 Run draft_cli prepare to write proposal.json, explain findings and limits, and wait for human review. If a critical tier/region/model ambiguity requires a human answer first, use draft_cli ask to write only needs_input.json in this attempt and wait for clarification instead. NEVER claim committed/imported and NEVER auto-confirm.
 """
 
+    def _history_token_usage(self, session_id: str, user_text: str | None) -> dict[str, Any] | None:
+        """Aggregate only assistant steps anchored to this exact submitted user turn."""
+        anchored, found = False, False
+        steps, measured, seen = 0, 0, set()
+        totals = {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}}
+        for message in self._history_raw.get(session_id, []):
+            if not isinstance(message, dict):
+                continue
+            info = message.get("info") if isinstance(message.get("info"), dict) else {}
+            if info.get("role") == "user":
+                text = "\n".join(part.get("text", "") for part in message.get("parts", [])
+                                  if isinstance(part, dict) and part.get("type") == "text")
+                anchored = bool(user_text and text == user_text)
+                if anchored:
+                    found, steps, measured, seen = True, 0, 0, set()
+                    totals = {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}}
+                continue
+            if not anchored or info.get("role") != "assistant":
+                continue
+            key = info.get("id")
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            steps += 1
+            tokens = info.get("tokens")
+            if not isinstance(tokens, dict) or not any(isinstance(tokens.get(field), (int, float))
+                                                       for field in ("input", "output")):
+                continue
+            measured += 1
+            for field in ("input", "output", "reasoning"):
+                number = tokens.get(field)
+                if isinstance(number, (int, float)) and not isinstance(number, bool) and number >= 0:
+                    totals[field] += number
+            cache = tokens.get("cache") or {}
+            for field in ("read", "write"):
+                number = cache.get(field)
+                if isinstance(number, (int, float)) and not isinstance(number, bool) and number >= 0:
+                    totals["cache"][field] += number
+        if not found or not steps:
+            return None
+        return {"task_tokens": totals if measured else None, "llm_steps": steps,
+                "task_token_measurement": "history" if measured == steps else "partial_history" if measured else "unavailable",
+                "measured_llm_steps": measured}
+
     async def _capture_history(self, identifier: str, session_id: str, user_text: str | None,
                                *, new_session: bool) -> None:
         """History is best effort; a received answer must survive any SDK/history outage."""
@@ -416,6 +643,13 @@ Run draft_cli prepare to write proposal.json, explain findings and limits, and w
             return
         job = self.workflow._job(identifier)
         updates: dict[str, Any] = {"messages": messages, "history_unavailable": False}
+        measured = self._history_token_usage(session_id, user_text)
+        if measured:
+            updates["context_usage"] = {**job.get("context_usage", {}), **measured}
+            self._sessions[session_id].setdefault("usage", {}).update(
+                last_task_tokens=measured["task_tokens"], last_llm_steps=measured["llm_steps"],
+                task_token_measurement=measured["task_token_measurement"])
+            atomic_json(self._sessions_path, self._sessions)
         if not job.get("assistant_message"):
             # Never turn a previous turn's answer into this failed request's response.
             anchored = new_session
@@ -448,8 +682,15 @@ Run draft_cli prepare to write proposal.json, explain findings and limits, and w
         user_text = None
         new_session = False
         history_captured = False
+        attempt_started = time.monotonic()
+        model_started = model_finished = None
         try:
             job = self.workflow._job(identifier)
+            metrics = {"read_compare_seconds": 0, "model_seconds": 0, "total_seconds": 0,
+                       "semantic_requests": 0, "submitted_message_chars": 0, "reused_entries": 0,
+                       "reinterpreted_entries": 0, "clarification_count": len(job.get("clarifications", [])),
+                       **job.get("metrics", {})}
+            self.workflow.update_job(identifier, metrics=metrics)
             async with self._client() as client:
                 if job["conversation_id"] is None:
                     session_id = await self._create_session(client, identifier)
@@ -464,9 +705,23 @@ Run draft_cli prepare to write proposal.json, explain findings and limits, and w
                     response = await client.post(f"/session/{session_id}/abort", params=self._params())
                     self._check(response, "clear pending request")
                     self._mark_abort_needed(session_id, False)
+                self.workflow.update_job(identifier, status="running")
+                reading_started = time.monotonic()
+                reading = prepare_source_reading(self.workflow, identifier)
+                job = self.workflow._job(identifier)
+                metrics = {**job.get("metrics", {}),
+                           "read_compare_seconds": round(job.get("metrics", {}).get("read_compare_seconds", 0) + time.monotonic() - reading_started, 6),
+                           "changed_context_chars": (reading or {}).get("stats", {}).get("changed_context_characters", 0)}
+                self.workflow.update_job(identifier, metrics=metrics)
+                if reading is not None and not reading["needs_model"]:
+                    self.workflow.accept_source_proposal(identifier, {})
+                    self.workflow.update_job(identifier, assistant_message="Confirmed source interpretation reused; review the current database reconciliation before confirming.",
+                        context_usage={"model_calls": 0, "semantic_requests": 0, "submitted_message_chars": 0,
+                                       "prompt_chars": 0, "llm_steps": 0, "tokens": None, "last_turn_tokens": None,
+                                       "task_tokens": None, "token_measurement": "no_model_request", "task_token_measurement": "no_model_request"})
+                    return
                 self._active.add(identifier)
                 self._mark_abort_needed(session_id, True)
-                self.workflow.update_job(identifier, status="running")
                 directory, snapshot, paths = self._prepare_run(identifier)
                 file_map = [{"filename": self.workflow.state["uploads"][key]["filename"], "path": str(path)}
                             for key, path in zip(job["upload_ids"], paths)]
@@ -474,15 +729,30 @@ Run draft_cli prepare to write proposal.json, explain findings and limits, and w
                 if job.get("clarifications"):
                     answers = [{"attempt": item["attempt"], "prompt": item["prompt"]} for item in job["clarifications"]]
                     user_text += "\n\nHuman clarification answers (latest business interpretation takes precedence):\n" + json.dumps(answers, ensure_ascii=False)
-                user_text += "\n\nCurrent attempt: " + str(job.get("attempt", 1)) + "\nBusiness files (use original filename for source evidence):\n" + json.dumps(file_map, ensure_ascii=False)
+                if job.get("_source_changed_context") is not None:
+                    user_text += "\n\nCurrent attempt: " + str(job.get("attempt", 1)) + "\nChanged-region package (read only this source package): " + str(directory / "changed_context.json")
+                else:
+                    user_text += "\n\nCurrent attempt: " + str(job.get("attempt", 1)) + "\nBusiness files (use original filename for source evidence):\n" + json.dumps(file_map, ensure_ascii=False)
+                system_prompt = (self._system_prompt(directory, snapshot, job) + self._supplier_update_prompt(job)
+                                 + self._lookup_prompt(job, snapshot) + self._source_reading_prompt(job, directory))
+                if job.get("supplier_id"):
+                    system_prompt += ("\nRecent supplier outcomes:\n" + self._sessions[session_id].get("summary", "")
+                                      + "\nPrior batch prompts and answers in conversation history are historical data. "
+                                        "Only the current profile, current request and current task answers define reusable interpretation.\n")
+                model_started = time.monotonic()
+                metrics = {**job.get("metrics", {}), "semantic_requests": job.get("metrics", {}).get("semantic_requests", 0) + 1,
+                           "submitted_message_chars": job.get("metrics", {}).get("submitted_message_chars", 0) + len(system_prompt) + len(user_text)}
+                self.workflow.update_job(identifier, metrics=metrics)
                 response = await client.post(f"/session/{session_id}/message", params=self._params(),
                     json={"model": {"providerID": self.config.provider_id, "modelID": self.config.model_id},
-                          "system": self._system_prompt(directory, snapshot) + self._supplier_update_prompt(job) + self._lookup_prompt(job, snapshot),
+                          "system": system_prompt,
                           "parts": [{"type": "text", "text": user_text}]})
+                model_finished = time.monotonic()
                 try:
                     body = response.json()
                 except ValueError:
                     body = None
+                self._record_usage(identifier, body, len(system_prompt) + len(user_text), time.monotonic() - model_started)
                 # Persist actual text BEFORE response, proposal or schema validation can fail.
                 self._capture_body(identifier, body)
                 self._check(response, "send message")
@@ -507,7 +777,7 @@ Run draft_cli prepare to write proposal.json, explain findings and limits, and w
                 bundle = payload.get("bundle", payload)
                 if not isinstance(bundle, dict):
                     raise OpenCodeAgentError("Draft bundle must be a JSON object")
-                self.workflow.accept_proposal(identifier, bundle,
+                self.workflow.accept_source_proposal(identifier, bundle,
                     payload.get("issues") if isinstance(payload.get("issues"), list) else [],
                     payload.get("reconciliation_request", payload.get("reconciliation"))
                     if isinstance(payload.get("reconciliation_request", payload.get("reconciliation")), dict) else None)
@@ -527,6 +797,15 @@ Run draft_cli prepare to write proposal.json, explain findings and limits, and w
                 except Exception:
                     pass
         finally:
+            with self.workflow._lock:
+                current = self.workflow._job(identifier)
+                metrics = dict(current.get("metrics", {}))
+                metrics["total_seconds"] = round(metrics.get("total_seconds", 0) + time.monotonic() - attempt_started, 6)
+                if model_started is not None:
+                    metrics["model_seconds"] = round(metrics.get("model_seconds", 0) + (model_finished or time.monotonic()) - model_started, 6)
+                metrics["clarification_count"] = len(current.get("clarifications", []))
+                current["metrics"] = metrics
+                self.workflow._save()
             self._active.discard(identifier)
             if locked and session_lock is not None:
                 session_lock.release()

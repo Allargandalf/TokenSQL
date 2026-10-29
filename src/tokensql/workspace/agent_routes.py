@@ -17,6 +17,16 @@ class StartRequest(BaseModel):
     conversation_id: str | None = None
     supplier_id: str | None = None
     update_request: dict[str, Any] | None = None
+    source_scope: str | None = Field(default=None, min_length=1, max_length=255)
+    persist_profile: bool = True
+    remember_prompt: bool = False
+    full_reparse: bool = False
+
+class SupplierSessionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_scope: str = Field(default="default", min_length=1, max_length=255)
+    new_round: bool = False
+
 
 class OfficialLookupRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -30,6 +40,8 @@ class ProposalRequest(BaseModel):
     bundle: dict[str, Any] | None = None
     reconciliation_request: dict[str, Any] | None = None
     decisions: list[dict[str, Any]] | None = None
+    persist_profile: bool | None = None
+    remember_prompt: bool | None = None
 
 class DraftRequest(BaseModel):
     bundle: dict[str, Any]
@@ -45,6 +57,8 @@ class RespondRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=16000)
     supplier_id: str | None = None
     update_request: dict[str, Any] | None = None
+    persist_profile: bool | None = None
+    remember_prompt: bool | None = None
 
     @field_validator("prompt")
     @classmethod
@@ -76,6 +90,8 @@ def create_agent_router(manager: OpenCodeAgentManager) -> APIRouter:
     @router.post("/agent/messages", status_code=202)
     async def submit_message(prompt: str = Form(...), conversation_id: str | None = Form(None),
                              supplier_id: str | None = Form(None), update_request: str | None = Form(None),
+                             source_scope: str | None = Form(None), persist_profile: bool = Form(True),
+                             remember_prompt: bool = Form(False), full_reparse: bool = Form(False),
                              files: list[UploadFile] = File(default=[])):
         uploads = await read_uploads(files, manager.config)
         try:
@@ -83,7 +99,8 @@ def create_agent_router(manager: OpenCodeAgentManager) -> APIRouter:
             if context is not None and not isinstance(context, dict):
                 raise ValueError("update_request must be a JSON object")
             run = await manager.submit(prompt=prompt, files=uploads, conversation_id=conversation_id,
-                                       supplier_id=supplier_id, update_request=context)
+                                       supplier_id=supplier_id, update_request=context, source_scope=source_scope,
+                                       persist_profile=persist_profile, remember_prompt=remember_prompt, full_reparse=full_reparse)
             return run.public_dict()
         except (ValueError, KeyError, OSError, RevisionConflictError) as error:
             raise problem(error) from None
@@ -109,6 +126,13 @@ def create_agent_router(manager: OpenCodeAgentManager) -> APIRouter:
     @router.get("/agent/sessions")
     async def sessions():
         return {"items": await manager.sessions()}
+
+    @router.post("/agent/suppliers/{supplier_id}/session")
+    async def supplier_session(supplier_id: str, payload: SupplierSessionRequest):
+        try:
+            return await manager.supplier_session(supplier_id, **payload.model_dump())
+        except Exception as error:
+            raise problem(error) from None
 
     @router.get("/agent/sessions/{session_id}/messages")
     async def history(session_id: str):

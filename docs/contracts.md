@@ -1,6 +1,8 @@
 # 本轮协作接口约定
 
-更新：2026-10-28。当前边界由主Agent统一同步；旧physical_key已移除。本轮新增条件定价、稳定官网ID、折扣范围与多项匹配响应详见[共同契约](pricing_conditions_contract.md)，冲突时以该契约为准。
+更新：2026-10-29。当前边界由主Agent统一同步；旧physical_key已移除。本轮新增条件定价、稳定官网ID、折扣范围与多项匹配响应详见[共同契约](pricing_conditions_contract.md)，冲突时以该契约为准。
+
+供应商档案、默认会话和报价差异读取见[供应商路由契约](supplier_routing.md)。
 
 ## 数据
 
@@ -46,7 +48,9 @@ POST /api/workspace/imports/{id}/cancel → 不写正式数据/记忆，丢弃�
 
 会话：GET /api/workspace/agent/sessions、GET /agent/sessions/{id}/messages；UI 恢复后复用 session ID。明确历史由 OpenCode 存储，不能只存浏览器内存。
 
-记忆：GET /api/workspace/agent/memory；PATCH 同路径由人工修订；人工确认提议修正后自动记录 scoped corrections。取消不生成长期规则。每次模型消息读取最新 agent.md，多层 Prompt 合并。
+档案：GET/PUT /api/workspace/suppliers/{supplier_id}/profile 管理供应商和 source_scope 的已确认业务含义；每次任务加载对应有效档案。确认补答/审核修订后保存长期解释，本期说明可单独使用，金额/折扣/日期修订保留在该批证据。
+
+全局偏好：GET/PATCH /api/workspace/agent/memory 管理应用级规则；独立 agent.md 保存全局规则和档案加载说明。
 
 ## 所有权与工程
 
@@ -55,5 +59,5 @@ POST /api/workspace/imports/{id}/cancel → 不写正式数据/记忆，丢弃�
 - 前端 Agent owns static/ 与 tools/workspace_browser_smoke.py、浏览器验收脚本。
 - 主Agent owns app/config/runtime、plan/progress/AGENTS/文档、部署脚本、双库comparator及集成。主Agent Astra统筹，编码/审查Subagent使用gpt-6.1-sol ultra。
 - 所有接口同源；真实 Excel/DB/提议/记忆/日志/比较报告不进 Git，不读取 handoff/私有交接/清理备份。只用远端 ssh uni，不写本机文件。
-- 本轮正式库已按用户要求清空，不整理存量、不重导旧原件，等待用户新文件；隔离合成数据验收不等于真实文件验收。XLS用xlrd，XLSX用openpyxl，数据抽取不是固定逐行流水线。
+- 开发保留用户数据库和上传文件。验收使用隔离数据，并单独记录真实模型与真实文件结果。XLS用xlrd，XLSX用openpyxl；代码读取结构和差异，OpenCode解释业务含义。
 - OpenCode 运行在项目外专用目录，仅拿目录快照/草案工具，不给正式数据库写路径；生产提交权在审核服务。隔离强度与限制必须如实文档化。
